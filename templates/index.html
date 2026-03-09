@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Konwerter XLSX</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Konwerter z XLSX</h1>
+        <p class="subtitle">Zmień plik .xlsx na estetyczny .docx lub .pdf</p>
+
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <ul class="flashes">
+            {% for message in messages %}
+              <li>{{ message }}</li>
+            {% endfor %}
+            </ul>
+          {% endif %}
+        {% endwith %}
+
+        <form action="/upload" method="post" enctype="multipart/form-data" id="convertForm">
+            <div class="form-group file-group">
+                <label for="file">Wybierz plik .xlsx:</label>
+                <input type="file" name="file" id="file" accept=".xlsx" required>
+            </div>
+
+            <fieldset>
+                <legend>Wygląd dokumentu</legend>
+
+                <div class="form-group">
+                    <label for="title">Tytuł dokumentu:</label>
+                    <input type="text" name="title" id="title" placeholder="np. Raport miesięczny">
+                </div>
+
+                <div class="form-group">
+                    <label for="orientation">Orientacja strony:</label>
+                    <select name="orientation" id="orientation">
+                        <option value="portrait">Pionowa (Portrait)</option>
+                        <option value="landscape">Pozioma (Landscape)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="fontSize">Rozmiar czcionki (pt):</label>
+                    <input type="number" name="fontSize" id="fontSize" min="8" max="24" value="10">
+                </div>
+
+                <div class="form-group">
+                    <label for="spacing">Odstępy w komórkach:</label>
+                    <select name="spacing" id="spacing">
+                        <option value="tight">Ciasne</option>
+                        <option value="normal" selected>Normalne</option>
+                        <option value="loose">Luźne</option>
+                    </select>
+                </div>
+
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" name="pageNumbers" id="pageNumbers" value="true">
+                    <label for="pageNumbers">Dodaj numerowanie stron</label>
+                </div>
+            </fieldset>
+
+            <fieldset class="format-group">
+                <legend>Format docelowy</legend>
+                <div class="radio-group">
+                    <input type="radio" name="format" id="formatPdf" value="pdf" checked>
+                    <label for="formatPdf">PDF</label>
+                </div>
+                <div class="radio-group">
+                    <input type="radio" name="format" id="formatDocx" value="docx">
+                    <label for="formatDocx">DOCX</label>
+                </div>
+            </fieldset>
+
+            <button type="submit" class="btn-submit">Konwertuj i Pobierz</button>
+        </form>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
