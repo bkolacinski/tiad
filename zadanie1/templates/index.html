@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>xlsx &rarr; docx/pdf</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      :root {
+        --black: #000;
+        --gray:  #666;
+        --line:  #d0d0d0;
+        --bg:    #fff;
+        --hover: #f5f5f5;
+      }
+
+      body {
+        font-family: "Courier New", Courier, monospace;
+        font-size: 14px;
+        line-height: 1.6;
+        background: var(--bg);
+        color: var(--black);
+        padding: 48px 24px 80px;
+      }
+
+      .shell { max-width: 620px; margin: 0 auto; }
+
+      /* ── header ── */
+      header {
+        border-top: 2px solid var(--black);
+        padding-top: 12px;
+        margin-bottom: 48px;
+      }
+      header .label {
+        font-size: 11px;
+        letter-spacing: .12em;
+        text-transform: uppercase;
+        color: var(--gray);
+        margin-bottom: 4px;
+      }
+      header h1 { font-size: 22px; font-weight: bold; letter-spacing: -.01em; }
+
+      /* ── flash ── */
+      .flash {
+        background: var(--black);
+        color: var(--bg);
+        padding: 10px 14px;
+        font-size: 13px;
+        margin-bottom: 32px;
+      }
+
+      /* ── blocks ── */
+      .block { border-top: 1px solid var(--line); padding: 24px 0; }
+      .block-title {
+        font-size: 11px;
+        letter-spacing: .10em;
+        text-transform: uppercase;
+        color: var(--gray);
+        margin-bottom: 18px;
+      }
+
+      /* ── fields ── */
+      .field { margin-bottom: 20px; }
+      .field > label {
+        display: block;
+        font-size: 12px;
+        color: var(--gray);
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+      }
+
+      input[type="text"],
+      input[type="number"],
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 0;
+        background: var(--bg);
+        font: inherit;
+        font-size: 14px;
+        color: var(--black);
+        padding: 9px 10px;
+        outline: none;
+        -webkit-appearance: none;
+        appearance: none;
+        transition: border-color .15s;
+      }
+      input[type="text"]:focus,
+      input[type="number"]:focus,
+      select:focus { border-color: var(--black); }
+
+      /* ── drop zone ── */
+      .drop-zone {
+        border: 1px dashed var(--line);
+        padding: 32px 20px;
+        text-align: center;
+        cursor: pointer;
+        position: relative;
+        background: var(--bg);
+        transition: background .15s, border-color .15s;
+      }
+      .drop-zone:hover, .drop-zone.over {
+        background: var(--hover);
+        border-color: var(--black);
+      }
+      .drop-zone input[type="file"] {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        opacity: 0;
+        cursor: pointer;
+      }
+      .drop-zone .dz-text { pointer-events: none; color: var(--gray); font-size: 13px; }
+      .drop-zone .dz-text strong { display: block; font-size: 14px; color: var(--black); margin-bottom: 4px; }
+      .file-name { margin-top: 10px; font-size: 13px; color: var(--gray); min-height: 1.4em; }
+
+      /* ── format toggle ── */
+      .fmt-toggle { display: flex; }
+      .fmt-toggle input[type="radio"] { display: none; }
+      .fmt-toggle label {
+        flex: 1;
+        text-align: center;
+        padding: 9px 16px;
+        border: 1px solid var(--line);
+        margin-right: -1px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 14px;
+        color: var(--gray);
+        transition: background .15s, color .15s, border-color .15s;
+        letter-spacing: 0;
+      }
+      .fmt-toggle input[type="radio"]:checked + label {
+        background: var(--black);
+        color: var(--bg);
+        border-color: var(--black);
+        position: relative;
+        z-index: 1;
+      }
+
+      /* ── two-col grid ── */
+      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+      /* ── checkbox ── */
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 0;
+        cursor: pointer;
+      }
+      .check-row input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        border: 1px solid var(--line);
+        -webkit-appearance: none;
+        appearance: none;
+        cursor: pointer;
+        position: relative;
+        flex-shrink: 0;
+        background: var(--bg);
+        transition: background .15s, border-color .15s;
+      }
+      .check-row input[type="checkbox"]:checked {
+        background: var(--black);
+        border-color: var(--black);
+      }
+      .check-row input[type="checkbox"]:checked::after {
+        content: "";
+        position: absolute;
+        inset: 3px;
+        background: var(--bg);
+        clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+      }
+      .check-row span { font-size: 14px; }
+
+      /* ── hint ── */
+      .hint { font-size: 12px; color: var(--gray); margin-top: 4px; }
+
+      /* ── actions ── */
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; padding-top: 8px; }
+
+      button {
+        font: inherit;
+        font-size: 13px;
+        letter-spacing: .04em;
+        border: 1px solid var(--black);
+        border-radius: 0;
+        padding: 11px 22px;
+        cursor: pointer;
+        text-transform: uppercase;
+        transition: background .15s, color .15s;
+      }
+      .btn-primary   { background: var(--black); color: var(--bg); }
+      .btn-primary:hover   { background: #333; border-color: #333; }
+      .btn-secondary { background: var(--bg);    color: var(--black); }
+      .btn-secondary:hover { background: var(--hover); }
+
+      @media (max-width: 500px) {
+        .two-col { grid-template-columns: 1fr; }
+        .actions { flex-direction: column; }
+        button   { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div class="label">Zadanie 1 &middot; Konwersja arkusza</div>
+        <h1>XLSX &rarr; DOCX / PDF</h1>
+      </header>
+
+      <form method="post" action="/convert" enctype="multipart/form-data">
+        {% with messages = get_flashed_messages() %}{% if messages %}{% for m in messages %}
+        <div class="flash">{{ m }}</div>
+        {% endfor %}{% endif %}{% endwith %}
+
+        <!-- plik wejsciowy -->
+        <div class="block">
+          <div class="block-title">Plik wej&#347;ciowy</div>
+          <div class="drop-zone" id="dropZone">
+            <input type="file" name="file" id="fileInput" accept=".xlsx" required />
+            <div class="dz-text">
+              <strong>Przeci&#261;gnij plik tutaj lub kliknij</strong>
+              Obs&#322;ugiwany format: .xlsx
+            </div>
+          </div>
+          <div class="file-name" id="fileName">Brak wybranego pliku.</div>
+        </div>
+
+        <!-- format wyjsciowy -->
+        <div class="block">
+          <div class="block-title">Format wyj&#347;ciowy</div>
+
+          <div class="field">
+            <div class="fmt-toggle">
+              <input type="radio" name="format" id="fmt-docx" value="docx" checked />
+              <label for="fmt-docx">DOCX</label>
+              <input type="radio" name="format" id="fmt-pdf" value="pdf" />
+              <label for="fmt-pdf">PDF</label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="title">Tytu&#322; dokumentu</label>
+            <input type="text" name="title" id="title" placeholder="np. Raport sprzeda&#380;y" />
+            <div class="hint">Opcjonalne.</div>
+          </div>
+        </div>
+
+        <!-- uklad strony -->
+        <div class="block">
+          <div class="block-title">Uk&#322;ad strony</div>
+
+          <div class="two-col">
+            <div class="field">
+              <label for="alignment">Wyr&oacute;wnanie</label>
+              <select name="alignment" id="alignment">
+                <option value="left" {% if settings.alignment == 'left' %}selected{% endif %}>Do lewej</option>
+                <option value="center" {% if settings.alignment == 'center' %}selected{% endif %}>Wy&#347;rodkowanie</option>
+                <option value="right" {% if settings.alignment == 'right' %}selected{% endif %}>Do prawej</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="lineSpacing">Interlinia</label>
+              <input type="number" name="line_spacing" id="lineSpacing" step="0.05" min="1" max="3" value="{{ settings.line_spacing }}" />
+            </div>
+
+            <div class="field">
+              <label for="spaceAfter">Odst&#281;p po akapicie (pt)</label>
+              <input type="number" name="space_after" id="spaceAfter" step="1" min="0" max="40" value="{{ settings.space_after }}" />
+            </div>
+
+            <div class="field">
+              <label>Numerowanie stron</label>
+              <label class="check-row">
+                <input type="checkbox" name="page_numbers" id="pageNumbers" {% if settings.page_numbers %}checked{% endif %} />
+                <span>W&#322;&#261;cz numeracj&#281;</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- akcje -->
+        <div class="block">
+          <div class="actions">
+            <button type="submit" class="btn-primary">Konwertuj i pobierz</button>
+            <button type="submit" name="save_settings" value="1" class="btn-secondary">Zapisz ustawienia i pobierz</button>
+          </div>
+        </div>
+      </form>
+    </main>
+
+    <script>
+      const input = document.getElementById('fileInput');
+      const label = document.getElementById('fileName');
+      const zone  = document.getElementById('dropZone');
+
+      input.addEventListener('change', () => {
+        label.textContent = input.files[0]?.name ?? 'Brak wybranego pliku.';
+      });
+
+      zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+      zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+      zone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        zone.classList.remove('over');
+        if (e.dataTransfer.files.length) {
+          input.files = e.dataTransfer.files;
+          label.textContent = input.files[0].name;
+        }
+      });
+    </script>
+  </body>
+</html>
