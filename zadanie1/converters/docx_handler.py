@@ -14,6 +14,7 @@ _ALIGN = {
 }
 
 _MIN_COL_TWIPS = 567
+_MAX_WORD_COLS = 63
 
 # ---------------------------------------------------------------------------
 # Pre-computed namespace-qualified tag/attribute names (lxml {uri}local form).
@@ -373,6 +374,79 @@ def _set_cell_content(tc, value: str, width_twips: int,
     t.text = value
 
 
+def _find_safe_splits(merges, n_cols, max_cols=_MAX_WORD_COLS):
+    """Return list of (start, end) column ranges that avoid breaking merges."""
+    if n_cols <= max_cols:
+        return [(0, n_cols)]
+
+    blocked = set()
+    for merge in merges:
+        for c in range(merge["start_col"] + 1, merge["end_col"] + 1):
+            blocked.add(c)
+
+    ranges = []
+    start = 0
+    while start < n_cols:
+        if start + max_cols >= n_cols:
+            ranges.append((start, n_cols))
+            break
+        for sp in range(start + max_cols, start, -1):
+            if sp not in blocked:
+                ranges.append((start, sp))
+                start = sp
+                break
+        else:
+            ranges.append((start, start + max_cols))
+            start += max_cols
+    return ranges
+
+
+def _split_sheet(df, excel_widths, cells, merges, max_cols=_MAX_WORD_COLS):
+    """Split wide sheets into column chunks that fit within Word's limit."""
+    n_cols = df.shape[1]
+    if n_cols <= max_cols:
+        return [(df, excel_widths, cells, merges)]
+
+    col_ranges = _find_safe_splits(merges, n_cols, max_cols)
+    chunks = []
+
+    for col_start, col_end in col_ranges:
+        chunk_width = col_end - col_start
+
+        df_chunk = df.iloc[:, col_start:col_end].copy()
+        df_chunk.columns = range(chunk_width)
+        widths_chunk = excel_widths[col_start:col_end]
+        cells_chunk = [row[col_start:col_end] for row in cells]
+
+        merges_chunk = []
+        valid_ranges = set()
+        for merge in merges:
+            sc, ec = merge["start_col"], merge["end_col"]
+            if sc >= col_start and ec < col_end:
+                m = dict(merge)
+                m["start_col"] = sc - col_start
+                m["end_col"] = ec - col_start
+                merges_chunk.append(m)
+                valid_ranges.add(merge["range"])
+
+        # Fix cells whose merge was dropped (cross-boundary, shouldn't happen
+        # with safe splits but handle defensively)
+        for row in cells_chunk:
+            for ci, cell in enumerate(row):
+                merge_info = cell.get("merge")
+                if merge_info and merge_info.get("range") not in valid_ranges:
+                    row[ci] = {
+                        "value": cell.get("value", ""),
+                        "style": cell.get("style", {}),
+                        "merge": None,
+                        "hidden_by_merge": False,
+                    }
+
+        chunks.append((df_chunk, widths_chunk, cells_chunk, merges_chunk))
+
+    return chunks
+
+
 def df_to_docx(sheets, settings: dict, output) -> None:
     alignment_str = settings.get("alignment", "left")
     alignment = _ALIGN.get(alignment_str, WD_ALIGN_PARAGRAPH.LEFT)
@@ -385,16 +459,20 @@ def df_to_docx(sheets, settings: dict, output) -> None:
     line_val = str(int(line_spacing * 240))
     after_val = str(int(space_after * 20))
 
-    # Normalise all sheets
-    normalized: dict[str, tuple] = {}
+    # Normalise all sheets and split wide ones
+    split_sheets: dict[str, list[tuple]] = {}
     for sheet_name, payload in sheets.items():
         df, excel_widths, cells, merges = _normalize_sheet_payload(payload)
         df = _safe_dataframe(df)
         excel_widths = _normalize_widths(excel_widths, df.shape[1])
-        normalized[sheet_name] = (df, excel_widths, cells, merges)
+        chunks = _split_sheet(df, excel_widths, cells, merges)
+        split_sheets[sheet_name] = chunks
 
     max_cols = max(
-        (df.shape[1] for df, _, _, _ in normalized.values() if not df.empty),
+        (chunk_df.shape[1]
+         for chunks in split_sheets.values()
+         for chunk_df, _, _, _ in chunks
+         if not chunk_df.empty),
         default=1,
     )
     use_landscape = max_cols > 6
@@ -440,136 +518,126 @@ def df_to_docx(sheets, settings: dict, output) -> None:
         heading = doc.add_heading(title, level=0)
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    for sheet_name, (df, excel_widths, cells, merges) in normalized.items():
-        if len(normalized) > 1:
+    for sheet_name, chunks in split_sheets.items():
+        if len(split_sheets) > 1:
             sh = doc.add_heading(sheet_name, level=1)
             sh.alignment = alignment
 
-        if df.empty:
-            continue
+        for chunk_idx, (df, excel_widths, cells, merges) in enumerate(chunks):
+            if df.empty:
+                continue
 
-        twip_widths = _excel_to_twips_scaled(excel_widths, available_twips)
-        n_rows, n_cols = df.shape
+            twip_widths = _excel_to_twips_scaled(excel_widths, available_twips)
+            n_rows, n_cols = df.shape
 
-        # Use python-docx to create a valid table structure
-        table = doc.add_table(rows=n_rows, cols=n_cols)
-        table.style = "Table Grid"
+            table = doc.add_table(rows=n_rows, cols=n_cols)
+            table.style = "Table Grid"
 
-        # Handle merged cells via python-docx API (guaranteed correct)
-        for merge in merges:
-            if merge.get("is_anchor"):
-                try:
-                    start_cell = table.cell(merge["start_row"], merge["start_col"])
-                    end_cell = table.cell(merge["end_row"], merge["end_col"])
-                    start_cell.merge(end_cell)
-                except (IndexError, ValueError):
-                    pass
+            for merge in merges:
+                if merge.get("is_anchor"):
+                    try:
+                        start_cell = table.cell(merge["start_row"], merge["start_col"])
+                        end_cell = table.cell(merge["end_row"], merge["end_col"])
+                        start_cell.merge(end_cell)
+                    except (IndexError, ValueError):
+                        pass
 
-        # Access raw lxml elements — bypasses python-docx Row/Cell overhead
-        tbl_el = table._tbl
+            tbl_el = table._tbl
 
-        # Ensure tblGrid is correctly populated for Word to be happy with cell widths
-        tbl_grid = tbl_el.find(qn("w:tblGrid"))
-        if tbl_grid is not None:
-            tbl_el.remove(tbl_grid)
-        tbl_grid = OxmlElement("w:tblGrid")
-        for tw in twip_widths:
-            gc = OxmlElement("w:gridCol")
-            gc.set(qn("w:w"), str(tw))
-            tbl_grid.append(gc)
-        
-        # tblGrid MUST follow tblPr. Find tblPr's index.
-        tbl_pr = tbl_el.find(qn("w:tblPr"))
-        if tbl_pr is not None:
-            idx = tbl_el.index(tbl_pr)
-            tbl_el.insert(idx + 1, tbl_grid)
-        else:
-            tbl_el.insert(0, tbl_grid)
+            tbl_grid = tbl_el.find(qn("w:tblGrid"))
+            if tbl_grid is not None:
+                tbl_el.remove(tbl_grid)
+            tbl_grid = OxmlElement("w:tblGrid")
+            for tw in twip_widths:
+                gc = OxmlElement("w:gridCol")
+                gc.set(qn("w:w"), str(tw))
+                tbl_grid.append(gc)
 
-        tr_list = tbl_el.findall(_T_TR)
-        df_values = df.values.astype(str)
+            tbl_pr = tbl_el.find(qn("w:tblPr"))
+            if tbl_pr is not None:
+                idx = tbl_el.index(tbl_pr)
+                tbl_el.insert(idx + 1, tbl_grid)
+            else:
+                tbl_el.insert(0, tbl_grid)
 
-        for row_i, tr in enumerate(tr_list):
-            tc_list = tr.findall(_T_TC)
-            cells_row = cells[row_i] if row_i < len(cells) else None
+            tr_list = tbl_el.findall(_T_TR)
+            df_values = df.values.astype(str)
 
-            true_col_j = 0
-            for tc in tc_list:
-                # Find current grid span
-                span = 1
-                tcPr_el = tc.find(_T_TCPR)
-                if tcPr_el is not None:
-                    gs_el = tcPr_el.find(_T_GRIDSPAN)
-                    if gs_el is not None:
-                        try:
-                            span = int(gs_el.get(_A_VAL, "1"))
-                        except ValueError:
-                            span = 1
+            for row_i, tr in enumerate(tr_list):
+                tc_list = tr.findall(_T_TC)
+                cells_row = cells[row_i] if row_i < len(cells) else None
 
-                # Check hidden by merge (vMerge)
-                cd = None
-                if cells_row and true_col_j < len(cells_row):
-                    cd = cells_row[true_col_j]
+                true_col_j = 0
+                for tc in tc_list:
+                    span = 1
+                    tcPr_el = tc.find(_T_TCPR)
+                    if tcPr_el is not None:
+                        gs_el = tcPr_el.find(_T_GRIDSPAN)
+                        if gs_el is not None:
+                            try:
+                                span = int(gs_el.get(_A_VAL, "1"))
+                            except ValueError:
+                                span = 1
 
-                if cd and cd.get("hidden_by_merge"):
-                    # Even if hidden, we should set the width for consistency
+                    cd = None
+                    if cells_row and true_col_j < len(cells_row):
+                        cd = cells_row[true_col_j]
+
+                    if cd and cd.get("hidden_by_merge"):
+                        cell_w = sum(twip_widths[true_col_j : true_col_j + span])
+                        tcPr = tc.find(_T_TCPR)
+                        if tcPr is None:
+                            tcPr = etree.Element(_T_TCPR)
+                            tc.insert(0, tcPr)
+
+                        tcW = tcPr.find(_T_TCW)
+                        if tcW is None:
+                            tcW = etree.Element(_T_TCW)
+                            tcPr.insert(0, tcW)
+                        tcW.set(_A_W, str(cell_w))
+                        tcW.set(_A_TYPE, "dxa")
+
+                        v_merge_data = cd.get("merge")
+                        v_merge = v_merge_data.get("vMerge") if v_merge_data else None
+                        if v_merge:
+                            vm = tcPr.find(_T_VMERGE)
+                            if vm is None:
+                                vm = etree.Element(_T_VMERGE)
+                                pos = 0
+                                for i, child in enumerate(tcPr):
+                                    if child.tag in (_T_TCW, _T_GRIDSPAN):
+                                        pos = i + 1
+                                tcPr.insert(pos, vm)
+                            vm.set(_A_VAL, v_merge)
+
+                        true_col_j += span
+                        continue
+
+                    if cd:
+                        meta_value = cd.get("value")
+                        style = cd.get("style") or {}
+                    else:
+                        meta_value = None
+                        style = {}
+
+                    value = str(meta_value) if meta_value is not None else (
+                        df_values[row_i][true_col_j] if true_col_j < n_cols else ""
+                    )
+
                     cell_w = sum(twip_widths[true_col_j : true_col_j + span])
-                    tcPr = tc.find(_T_TCPR)
-                    if tcPr is None:
-                        tcPr = etree.Element(_T_TCPR)
-                        tc.insert(0, tcPr)
 
-                    # 1. tcW
-                    tcW = tcPr.find(_T_TCW)
-                    if tcW is None:
-                        tcW = etree.Element(_T_TCW)
-                        tcPr.insert(0, tcW)
-                    tcW.set(_A_W, str(cell_w))
-                    tcW.set(_A_TYPE, "dxa")
-
-                    # 2. vMerge for hidden cells
-                    v_merge_data = cd.get("merge")
-                    v_merge = v_merge_data.get("vMerge") if v_merge_data else None
-                    if v_merge:
-                        vm = tcPr.find(_T_VMERGE)
-                        if vm is None:
-                            vm = etree.Element(_T_VMERGE)
-                            pos = 0
-                            for i, child in enumerate(tcPr):
-                                if child.tag in (_T_TCW, _T_GRIDSPAN):
-                                    pos = i + 1
-                            tcPr.insert(pos, vm)
-                        vm.set(_A_VAL, v_merge)
-
+                    _set_cell_content(
+                        tc, value, cell_w,
+                        style.get("font") or {},
+                        style.get("fill") or {},
+                        style.get("alignment") or {},
+                        style.get("border") or {},
+                        font_scale, line_val, after_val, fallback_jc,
+                        v_merge=(cd.get("merge") or {}).get("vMerge") if cd else None
+                    )
                     true_col_j += span
-                    continue
 
-                if cd:
-                    meta_value = cd.get("value")
-                    style = cd.get("style") or {}
-                else:
-                    meta_value = None
-                    style = {}
-
-                value = str(meta_value) if meta_value is not None else (
-                    df_values[row_i][true_col_j] if true_col_j < n_cols else ""
-                )
-
-                # Sum widths of all columns this cell spans
-                cell_w = sum(twip_widths[true_col_j : true_col_j + span])
-
-                _set_cell_content(
-                    tc, value, cell_w,
-                    style.get("font") or {},
-                    style.get("fill") or {},
-                    style.get("alignment") or {},
-                    style.get("border") or {},
-                    font_scale, line_val, after_val, fallback_jc,
-                    v_merge=(cd.get("merge") or {}).get("vMerge") if cd else None
-                )
-                true_col_j += span
-
-        doc.add_paragraph()
+            doc.add_paragraph()
 
     if page_numbers:
         _add_page_number_field(section.footer)
