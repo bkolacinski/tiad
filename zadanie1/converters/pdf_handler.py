@@ -422,5 +422,7 @@ def df_to_pdf(sheets: dict, settings: dict, output) -> None:
         story.append(tbl)
         story.append(Spacer(1, 0.5 * cm))
 
-    on_page = _page_number_cb if page_numbers else None
-    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+    if page_numbers:
+        doc.build(story, onFirstPage=_page_number_cb, onLaterPages=_page_number_cb)
+    else:
+        doc.build(story)

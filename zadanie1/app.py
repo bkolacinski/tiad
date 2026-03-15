@@ -111,6 +111,8 @@ def convert():
         save_settings(persistable)
         flash("Ustawienia zostały zapisane.")
 
+    ignore_limits = "ignore_limits" in request.form
+
     try:
         sheets = read_xlsx(file)
     except Exception:
@@ -121,6 +123,19 @@ def convert():
     if not sheets:
         flash("Plik nie zawiera danych do konwersji.")
         return redirect(url_for("index"))
+
+    # Validate sheet dimensions
+    MAX_COLS_LIMIT = 20
+    if not ignore_limits:
+        for sheet_name, sheet_data in sheets.items():
+            df = sheet_data.get("dataframe")
+            if df is not None and df.shape[1] > MAX_COLS_LIMIT:
+                flash(
+                    f"Arkusz '{sheet_name}' ma za dużo kolumn ({df.shape[1]}). "
+                    f"Maksymalna zalecana liczba kolumn to {MAX_COLS_LIMIT}. "
+                    "Zaznacz opcję 'Ignoruj limity', jeśli mimo to chcesz spróbować konwersji."
+                )
+                return redirect(url_for("index"))
 
     buf = io.BytesIO()
     base = os.path.splitext(filename)[0]

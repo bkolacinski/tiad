@@ -154,6 +154,7 @@ def _collect_merged_map(ws) -> dict[tuple[int, int], dict]:
             "end_col": max_col - 1,
             "rowspan": max_row - min_row + 1,
             "colspan": max_col - min_col + 1,
+            "vMerge": "restart" if max_row > min_row else None,
             "is_anchor": True,
         }
 
@@ -171,6 +172,7 @@ def _collect_merged_map(ws) -> dict[tuple[int, int], dict]:
                     "end_col": max_col - 1,
                     "rowspan": max_row - min_row + 1,
                     "colspan": max_col - min_col + 1,
+                    "vMerge": "continue" if max_row > min_row else None,
                     "is_anchor": False,
                 }
 
@@ -214,25 +216,23 @@ def _cell_display_value(cell) -> str:
     return str(cell.value)
 
 
-def _build_dataframe(ws, n_rows: int, n_cols: int) -> pd.DataFrame:
-    rows = []
-    for row_idx in range(1, n_rows + 1):
-        row = []
-        for col_idx in range(1, n_cols + 1):
-            row.append(_cell_display_value(ws.cell(row=row_idx, column=col_idx)))
-        rows.append(row)
-    return pd.DataFrame(rows, dtype=str).fillna("")
-
-
-def _collect_cells_metadata(ws, n_rows: int, n_cols: int, merged_map: dict[tuple[int, int], dict]) -> list[list[dict]]:
+def _collect_all_sheet_data(
+    ws, n_rows: int, n_cols: int, merged_map: dict[tuple[int, int], dict]
+) -> tuple[pd.DataFrame, list[list[dict]]]:
+    rows_data: list[list[str]] = []
     cells_meta: list[list[dict]] = []
+    style_cache: dict[int, dict] = {}
 
-    for row_idx in range(1, n_rows + 1):
+    for row_idx, row_cells in enumerate(
+        ws.iter_rows(min_row=1, max_row=n_rows, min_col=1, max_col=n_cols), 1
+    ):
+        row_data: list[str] = []
         row_meta: list[dict] = []
-        for col_idx in range(1, n_cols + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            merge_meta = merged_map.get((row_idx, col_idx))
+        for col_idx, cell in enumerate(row_cells, 1):
+            val = _cell_display_value(cell)
+            row_data.append(val)
 
+            merge_meta = merged_map.get((row_idx, col_idx))
             if merge_meta and not merge_meta["is_anchor"]:
                 row_meta.append(
                     {
@@ -244,17 +244,23 @@ def _collect_cells_metadata(ws, n_rows: int, n_cols: int, merged_map: dict[tuple
                 )
                 continue
 
+            s_idx = getattr(cell, "style_id", 0)
+            if s_idx not in style_cache:
+                style_cache[s_idx] = _extract_cell_style(cell)
+
             row_meta.append(
                 {
-                    "value": _cell_display_value(cell),
-                    "style": _extract_cell_style(cell),
+                    "value": val,
+                    "style": style_cache[s_idx],
                     "merge": merge_meta,
                     "hidden_by_merge": False,
                 }
             )
+        rows_data.append(row_data)
         cells_meta.append(row_meta)
 
-    return cells_meta
+    df = pd.DataFrame(rows_data, dtype=str).fillna("")
+    return df, cells_meta
 
 
 def read_xlsx(file) -> dict[str, dict]:
@@ -277,10 +283,9 @@ def read_xlsx(file) -> dict[str, dict]:
         merged_map = _collect_merged_map(ws)
         max_row, max_col = _sheet_dimensions(ws, pd.DataFrame())
 
-        df = _build_dataframe(ws, max_row, max_col)
+        df, cells_meta = _collect_all_sheet_data(ws, max_row, max_col, merged_map)
         col_widths = _collect_column_widths(ws, max_col)
         row_heights = _collect_row_heights(ws, max_row)
-        cells_meta = _collect_cells_metadata(ws, max_row, max_col, merged_map)
 
         merges = []
         seen_ranges = set()
