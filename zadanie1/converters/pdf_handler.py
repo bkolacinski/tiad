@@ -1,7 +1,10 @@
+"""Konwersja danych z arkuszy Excel do formatu PDF."""
+
 import os
 from html import escape
 from typing import Any
 
+import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape as make_landscape
@@ -11,34 +14,36 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-_ALIGN_PARA = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+# Mapowanie wyrownan
+ALIGN_MAP = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
 
-_GRID_COLOR = colors.Color(0.82, 0.82, 0.82)
+# Mapowanie wyrownan z Excela
+EXCEL_ALIGN_MAP = {
+    "left": "left", "general": "left",
+    "center": "center", "centre": "center",
+    "right": "right", "justify": "left",
+}
 
+# Stale
+GRID_COLOR = colors.Color(0.82, 0.82, 0.82)
+MARGIN = 1.5 * cm
+MIN_COL_WIDTH_PT = 5.0
+EXCEL_CHAR_TO_PT = 7.0
+
+# Domyslne czcionki (nadpisywane przez _register_fonts)
 _FONT = "Helvetica"
 _FONT_BOLD = "Helvetica-Bold"
-_MARGIN = 1.5 * cm
-_SAFE_MIN_COL_WIDTH = 5.0
-
-# Approximate conversion: 1 Excel character unit ~ 7 points
-_EXCEL_CHAR_TO_PT = 7.0
 
 
 def _register_fonts() -> None:
+    """Rejestruje czcionki z systemu obslugujace polskie znaki."""
     global _FONT, _FONT_BOLD
     candidates = [
-        (
-            "C:/Windows/Fonts/arial.ttf",
-            "C:/Windows/Fonts/arialbd.ttf",
-            "ArialPL",
-            "ArialPL-Bold",
-        ),
-        (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "DejaVuSans",
-            "DejaVuSans-Bold",
-        ),
+        ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf",
+         "ArialPL", "ArialPL-Bold"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+         "DejaVuSans", "DejaVuSans-Bold"),
     ]
     for regular, bold, rname, bname in candidates:
         if not (os.path.exists(regular) and os.path.exists(bold)):
@@ -46,8 +51,7 @@ def _register_fonts() -> None:
         try:
             pdfmetrics.registerFont(TTFont(rname, regular))
             pdfmetrics.registerFont(TTFont(bname, bold))
-            _FONT = rname
-            _FONT_BOLD = bname
+            _FONT, _FONT_BOLD = rname, bname
             return
         except Exception:
             continue
@@ -57,130 +61,116 @@ _register_fonts()
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Funkcje pomocnicze
 # ---------------------------------------------------------------------------
 
 
-def _normalize_sheet(payload: Any):
-    """Return (DataFrame, excel_col_widths, cells_meta, merges)."""
-    if isinstance(payload, dict):
-        df = payload.get("dataframe")
-        if df is None:
-            df = payload.get("df")
-        if df is None:
-            df = payload.get("sheet")
-        excel_widths = payload.get("excel_col_widths")
-        if excel_widths is None:
-            excel_widths = payload.get("column_widths")
-        if excel_widths is None:
-            excel_widths = payload.get("widths")
-        if excel_widths is None:
-            excel_widths = []
-        cells = payload.get("cells") or []
-        merges = payload.get("merges") or []
-        return df, list(excel_widths), cells, merges
-
-    if isinstance(payload, (tuple, list)) and len(payload) >= 1:
-        df = payload[0]
-        excel_widths = list(payload[1]) if len(payload) > 1 else []
-        meta = payload[2] if len(payload) > 2 and isinstance(payload[2], dict) else {}
-        cells = meta.get("cells") or []
-        merges = meta.get("merges") or []
-        return df, excel_widths, cells, merges
-
-    return payload, [], [], []
-
-
 def _parse_color(value: Any) -> colors.Color | None:
+    """Konwertuje kolor hex na obiekt Color reportlab."""
     if isinstance(value, colors.Color):
         return value
-    if isinstance(value, str):
-        raw = value.strip().lstrip("#")
-        if len(raw) == 8:
-            raw = raw[2:]
-        if len(raw) == 6:
-            try:
-                r = int(raw[0:2], 16) / 255
-                g = int(raw[2:4], 16) / 255
-                b = int(raw[4:6], 16) / 255
-                return colors.Color(r, g, b)
-            except ValueError:
-                return None
-    return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip().lstrip("#")
+    if len(raw) == 8:
+        raw = raw[2:]
+    if len(raw) != 6:
+        return None
+    try:
+        return colors.Color(
+            int(raw[0:2], 16) / 255,
+            int(raw[2:4], 16) / 255,
+            int(raw[4:6], 16) / 255,
+        )
+    except ValueError:
+        return None
+
+
+def _get_alignment(h_align: Any, fallback: str) -> str:
+    """Mapuje wyrownanie z Excela na nazwe zrozumiala dla PDF."""
+    if isinstance(h_align, str):
+        return EXCEL_ALIGN_MAP.get(h_align.lower().strip(), fallback)
+    return fallback
+
+
+def _get_cell_meta(cells: list, row: int, col: int) -> dict:
+    """Zwraca metadane komorki lub pusty slownik."""
+    try:
+        return cells[row][col]
+    except (IndexError, TypeError):
+        return {}
 
 
 def _col_widths_pts(excel_widths: list, n_cols: int, available_pt: float) -> list[float]:
-    """Convert Excel char-unit widths to points, scaling proportionally to fill page."""
+    """Przelicza szerokosci kolumn z Excela na punkty, skalujac do szerokosci strony."""
     widths = list(excel_widths[:n_cols])
     while len(widths) < n_cols:
         widths.append(8.43)
 
-    # Convert to natural point widths
-    natural = [w * _EXCEL_CHAR_TO_PT for w in widths]
-    total_natural = sum(natural) or 1.0
+    natural = [w * EXCEL_CHAR_TO_PT for w in widths]
+    total = sum(natural) or 1.0
+    factor = available_pt / total
+    scaled = [max(w * factor, MIN_COL_WIDTH_PT) for w in natural]
 
-    # Scale to fill available width proportionally
-    factor = available_pt / total_natural
-    scaled = [max(w * factor, _SAFE_MIN_COL_WIDTH) for w in natural]
-
-    # Re-adjust if minimums pushed us over
+    # Korekta jesli minima spowodowaly przekroczenie
     total_scaled = sum(scaled)
     if total_scaled > available_pt:
-        adjustable = [(i, w) for i, w in enumerate(scaled) if w > _SAFE_MIN_COL_WIDTH]
+        adjustable = [(i, w) for i, w in enumerate(scaled) if w > MIN_COL_WIDTH_PT]
         if adjustable:
             excess = total_scaled - available_pt
             per_col = excess / len(adjustable)
             for i, w in adjustable:
-                scaled[i] = max(w - per_col, _SAFE_MIN_COL_WIDTH)
+                scaled[i] = max(w - per_col, MIN_COL_WIDTH_PT)
 
     return scaled
 
 
-def _cell_meta(cells: list, row: int, col: int) -> tuple[str | None, dict]:
-    """Return (value, style_dict)."""
-    try:
-        m = cells[row][col]
-        return m.get("value"), m.get("style") or {}
-    except (IndexError, TypeError, AttributeError):
-        return None, {}
+def _get_font_scale(max_cols: int) -> float:
+    """Dobiera skale czcionki w zaleznosci od liczby kolumn."""
+    if max_cols <= 10:
+        return 1.0
+    if max_cols <= 15:
+        return 0.85
+    if max_cols <= 25:
+        return 0.72
+    if max_cols <= 50:
+        return 0.6
+    return 0.5
 
 
-def _is_hidden_by_merge(cells: list, row: int, col: int) -> bool:
-    try:
-        m = cells[row][col]
-        return bool(m.get("hidden_by_merge"))
-    except (IndexError, TypeError, AttributeError):
-        return False
+def _get_padding(max_cols: int) -> float:
+    """Dobiera padding komorek w zaleznosci od liczby kolumn."""
+    if max_cols <= 20:
+        return 4.0
+    if max_cols <= 30:
+        return 3.0
+    if max_cols <= 60:
+        return 2.0
+    return 1.0
 
 
-def _to_align(h_align: Any, fallback: str) -> str:
-    if isinstance(h_align, str):
-        return {
-            "left": "left",
-            "general": "left",
-            "center": "center",
-            "centre": "center",
-            "right": "right",
-            "justify": "left",
-        }.get(h_align.lower().strip(), fallback)
-    return fallback
+def _get_page_size(max_cols: int) -> tuple:
+    """Dobiera rozmiar strony w zaleznosci od liczby kolumn."""
+    if max_cols > 20:
+        page_w = max(841.89, max_cols * 30.0)
+        page_h = max(595.27, page_w * 0.707)
+        return (page_w, page_h)
+    if max_cols > 6:
+        return make_landscape(A4)
+    return A4
 
 
-def _make_para_style(
-    alignment: str, font_size: float, bold: bool, fg: colors.Color
-) -> ParagraphStyle:
-    return ParagraphStyle(
-        name=f"c_{alignment}_{font_size}_{int(bold)}",
-        fontName=_FONT_BOLD if bold else _FONT,
-        fontSize=font_size,
-        leading=font_size * 1.25,
-        alignment=_ALIGN_PARA.get(alignment, TA_LEFT),
-        textColor=fg,
-        wordWrap="LTR",
-    )
+def _border_weight(style_name: str) -> float:
+    """Zwraca grubosc obramowania dla danego stylu z Excela."""
+    return {
+        "thin": 0.5, "medium": 1.0, "thick": 1.5,
+        "hair": 0.25, "double": 1.0, "dotted": 0.5,
+        "dashed": 0.5, "mediumDashed": 1.0,
+    }.get(style_name, 0.5)
 
 
-def _page_number_cb(canvas, doc):
+def _page_number_callback(canvas, doc) -> None:
+    """Rysuje numer strony na srodku stopki."""
     canvas.saveState()
     canvas.setFont(_FONT, 8)
     canvas.setFillColor(colors.Color(0.5, 0.5, 0.5))
@@ -188,117 +178,93 @@ def _page_number_cb(canvas, doc):
     canvas.restoreState()
 
 
-def _border_weight(style_name: str) -> float:
-    return {
-        "thin": 0.5,
-        "medium": 1.0,
-        "thick": 1.5,
-        "hair": 0.25,
-        "double": 1.0,
-        "dotted": 0.5,
-        "dashed": 0.5,
-        "mediumDashed": 1.0,
-    }.get(style_name, 0.5)
-
-
 # ---------------------------------------------------------------------------
-# Table builder — preserves original Excel styling
+# Budowanie tabeli
 # ---------------------------------------------------------------------------
 
 
-def _build_table(
-    df,
-    cells: list,
-    merges: list,
-    col_widths_pt: list,
-    font_scale: float,
-    global_align: str,
-    padding_h: float = 4.0,
-):
-    import pandas as pd
+def _build_table_data(df: pd.DataFrame, cells: list, merges: list,
+                      font_scale: float, global_align: str,
+                      padding: float) -> tuple[list, list]:
+    """
+    Buduje dane i style tabeli dla reportlab.
 
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return None, []
-
+    Returns:
+        (data, style_cmds) - dane wierszy i lista polecen stylu
+    """
     n_rows, n_cols = df.shape
-    data = []
 
+    # Bazowe style tabeli
     style_cmds = [
-        ("GRID", (0, 0), (-1, -1), 0.25, _GRID_COLOR),
-        ("LEFTPADDING", (0, 0), (-1, -1), padding_h),
-        ("RIGHTPADDING", (0, 0), (-1, -1), padding_h),
+        ("GRID", (0, 0), (-1, -1), 0.25, GRID_COLOR),
+        ("LEFTPADDING", (0, 0), (-1, -1), padding),
+        ("RIGHTPADDING", (0, 0), (-1, -1), padding),
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
 
-    # Merged cell spans
+    # Scalenia komorek
     for merge in merges:
         if merge.get("is_anchor"):
-            style_cmds.append(
-                (
-                    "SPAN",
-                    (merge["start_col"], merge["start_row"]),
-                    (merge["end_col"], merge["end_row"]),
-                )
-            )
+            style_cmds.append((
+                "SPAN",
+                (merge["start_col"], merge["start_row"]),
+                (merge["end_col"], merge["end_row"]),
+            ))
 
+    # Budowanie wierszy danych
+    data = []
     for row_i in range(n_rows):
         row_data = []
         for col_j in range(n_cols):
-            # Hidden merge cells — add empty placeholder
-            if _is_hidden_by_merge(cells, row_i, col_j):
+            meta = _get_cell_meta(cells, row_i, col_j)
+
+            if meta.get("hidden_by_merge"):
                 row_data.append("")
                 continue
 
-            meta_value, style = _cell_meta(cells, row_i, col_j)
-            df_val = str(df.iat[row_i, col_j])
-            text = str(meta_value) if meta_value is not None else df_val
+            # Wartosc komorki
+            value = meta.get("value") if meta.get("value") is not None else str(df.iat[row_i, col_j])
+            text = escape(str(value)).replace("\n", "<br/>")
 
+            # Styl czcionki
+            style = meta.get("style", {})
             font = style.get("font") or {}
-            is_bold = bool(font.get("bold"))
-
-            # Font color from metadata
             fg = _parse_color(font.get("color")) or colors.black
+            font_size = max(float(font.get("size") or 11.0) * font_scale, 5.0)
+            bold = bool(font.get("bold"))
 
-            # Alignment from metadata, fallback to global
             h_align = (style.get("alignment") or {}).get("horizontal")
-            align = _to_align(h_align, global_align)
+            align = _get_alignment(h_align, global_align)
 
-            # Font size: preserve original, scaled by factor for page fit
-            original_size = float(font.get("size") or 11.0)
-            cell_font_size = max(original_size * font_scale, 5.0)
+            para_style = ParagraphStyle(
+                name=f"c_{row_i}_{col_j}",
+                fontName=_FONT_BOLD if bold else _FONT,
+                fontSize=font_size,
+                leading=font_size * 1.25,
+                alignment=ALIGN_MAP.get(align, TA_LEFT),
+                textColor=fg,
+            )
+            row_data.append(Paragraph(text, para_style))
 
-            para_style = _make_para_style(align, cell_font_size, is_bold, fg)
-            safe = escape(text).replace("\n", "<br/>")
-            row_data.append(Paragraph(safe, para_style))
-
-            # Cell background from metadata
-            fill_color = (style.get("fill") or {}).get("color")
+            # Kolor tla
+            fill_color = _parse_color((style.get("fill") or {}).get("color"))
             if fill_color:
-                bg = _parse_color(fill_color)
-                if bg:
-                    style_cmds.append(
-                        ("BACKGROUND", (col_j, row_i), (col_j, row_i), bg)
-                    )
+                style_cmds.append(("BACKGROUND", (col_j, row_i), (col_j, row_i), fill_color))
 
-            # Cell borders from metadata
+            # Obramowania
             border_info = style.get("border") or {}
-            border_side_map = {
-                "top": "LINEABOVE",
-                "bottom": "LINEBELOW",
-                "left": "LINEBEFORE",
-                "right": "LINEAFTER",
+            border_map = {
+                "top": "LINEABOVE", "bottom": "LINEBELOW",
+                "left": "LINEBEFORE", "right": "LINEAFTER",
             }
-            for side, cmd_name in border_side_map.items():
+            for side, cmd in border_map.items():
                 bdata = border_info.get(side)
-                if not bdata:
-                    continue
-                bc = _parse_color(bdata.get("color")) or colors.black
-                weight = _border_weight(bdata.get("style", "thin"))
-                style_cmds.append(
-                    (cmd_name, (col_j, row_i), (col_j, row_i), weight, bc)
-                )
+                if bdata:
+                    bc = _parse_color(bdata.get("color")) or colors.black
+                    weight = _border_weight(bdata.get("style", "thin"))
+                    style_cmds.append((cmd, (col_j, row_i), (col_j, row_i), weight, bc))
 
         data.append(row_data)
 
@@ -306,123 +272,88 @@ def _build_table(
 
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Funkcja glowna
 # ---------------------------------------------------------------------------
 
 
 def df_to_pdf(sheets: dict, settings: dict, output) -> None:
-    import pandas as pd
+    """
+    Konwertuje arkusze Excel na dokument PDF.
 
+    Args:
+        sheets: slownik {nazwa_arkusza: dane} z read_xlsx()
+        settings: ustawienia formatowania (alignment, page_numbers, itp.)
+        output: bufor wyjsciowy (BytesIO)
+    """
     alignment = settings.get("alignment", "left")
     page_numbers = bool(settings.get("page_numbers", True))
     title = (settings.get("title") or "").strip()
 
-    # Normalise sheets and find max column count
-    normalized: dict[str, tuple] = {}
+    # Przygotowanie danych arkuszy
+    prepared = []
     max_cols = 1
     for name, payload in sheets.items():
-        df, excel_widths, cells, merges = _normalize_sheet(payload)
-        if not isinstance(df, pd.DataFrame):
+        df = payload.get("dataframe")
+        if not isinstance(df, pd.DataFrame) or df.empty:
             continue
         df = df.fillna("")
-        if df.empty:
-            continue
-        if df.shape[1] > max_cols:
-            max_cols = df.shape[1]
-        normalized[name] = (df, excel_widths, cells, merges)
+        max_cols = max(max_cols, df.shape[1])
+        prepared.append((
+            name, df,
+            payload.get("excel_col_widths", []),
+            payload.get("cells", []),
+            payload.get("merges", []),
+        ))
 
-    if not normalized:
+    if not prepared:
         return
 
-    # Page orientation and size
-    use_landscape = max_cols > 6
-    if max_cols > 20:
-        page_w = max(841.89, max_cols * 30.0)
-        page_h = max(595.27, page_w * 0.707)
-        page_size = (page_w, page_h)
-    else:
-        page_size = make_landscape(A4) if use_landscape else A4
-    page_w, _page_h = page_size
-
-    available_pt = page_w - 2 * _MARGIN
-
-    # Font scale factor — preserve relative sizes but scale down for wide tables
-    if max_cols <= 10:
-        font_scale = 1.0
-    elif max_cols <= 15:
-        font_scale = 0.85
-    elif max_cols <= 25:
-        font_scale = 0.72
-    elif max_cols <= 50:
-        font_scale = 0.6
-    else:
-        font_scale = 0.5
-
-    # Padding
-    padding_h = 4.0
-    if max_cols > 20:
-        padding_h = 3.0
-    if max_cols > 30:
-        padding_h = 2.0
-    if max_cols > 60:
-        padding_h = 1.0
-
-    bottom_margin = 2.0 * cm if page_numbers else _MARGIN
+    # Konfiguracja strony
+    page_size = _get_page_size(max_cols)
+    font_scale = _get_font_scale(max_cols)
+    padding = _get_padding(max_cols)
+    available_pt = page_size[0] - 2 * MARGIN
 
     doc = SimpleDocTemplate(
-        output,
-        pagesize=page_size,
-        leftMargin=_MARGIN,
-        rightMargin=_MARGIN,
-        topMargin=_MARGIN,
-        bottomMargin=bottom_margin,
+        output, pagesize=page_size,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=MARGIN,
+        bottomMargin=2.0 * cm if page_numbers else MARGIN,
     )
 
-    title_style = ParagraphStyle(
-        name="title",
-        fontName=_FONT_BOLD,
-        fontSize=14,
-        leading=18,
-        alignment=TA_CENTER,
-        textColor=colors.black,
-        spaceAfter=10,
-    )
-    sheet_style = ParagraphStyle(
-        name="sheet",
-        fontName=_FONT_BOLD,
-        fontSize=11,
-        leading=14,
-        textColor=colors.Color(0.22, 0.45, 0.70),
-        spaceBefore=12,
-        spaceAfter=4,
-    )
-
+    # Budowanie zawartosci dokumentu
     story = []
 
     if title:
-        story.append(Paragraph(escape(title), title_style))
+        story.append(Paragraph(
+            escape(title),
+            ParagraphStyle("title", fontName=_FONT_BOLD, fontSize=14,
+                           leading=18, alignment=TA_CENTER, spaceAfter=10),
+        ))
         story.append(Spacer(1, 0.4 * cm))
 
-    for sheet_name, (df, excel_widths, cells, merges) in normalized.items():
-        if len(normalized) > 1:
-            story.append(Paragraph(escape(sheet_name), sheet_style))
+    for name, df, excel_widths, cells, merges in prepared:
+        # Naglowek arkusza (jesli wiele arkuszy)
+        if len(prepared) > 1:
+            story.append(Paragraph(
+                escape(name),
+                ParagraphStyle("sheet", fontName=_FONT_BOLD, fontSize=11,
+                               leading=14, textColor=colors.Color(0.22, 0.45, 0.70),
+                               spaceBefore=12, spaceAfter=4),
+            ))
 
-        col_widths_pt = _col_widths_pts(excel_widths, df.shape[1], available_pt)
-        table_data, style_cmds = _build_table(
-            df, cells, merges, col_widths_pt, font_scale, alignment, padding_h
+        col_widths = _col_widths_pts(excel_widths, df.shape[1], available_pt)
+        table_data, style_cmds = _build_table_data(
+            df, cells, merges, font_scale, alignment, padding,
         )
 
         if not table_data:
             continue
 
-        tbl = Table(
-            table_data, colWidths=col_widths_pt, repeatRows=1, splitInRow=1
-        )
+        tbl = Table(table_data, colWidths=col_widths, repeatRows=1, splitInRow=1)
         tbl.setStyle(TableStyle(style_cmds))
         story.append(tbl)
         story.append(Spacer(1, 0.5 * cm))
 
-    if page_numbers:
-        doc.build(story, onFirstPage=_page_number_cb, onLaterPages=_page_number_cb)
-    else:
-        doc.build(story)
+    on_page = _page_number_callback if page_numbers else None
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)

@@ -1,4 +1,6 @@
-﻿import io
+"""Aplikacja Flask do konwersji plików XLSX na DOCX/PDF."""
+
+import io
 import json
 import logging
 import os
@@ -22,6 +24,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
 app.logger.setLevel(logging.INFO)
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+MAX_DOCX_COLUMNS = 63
 
 DEFAULT_SETTINGS = {
     "alignment": "left",
@@ -32,34 +35,46 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict:
+    """Wczytuje ustawienia z pliku JSON lub zwraca domyslne."""
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, encoding="utf-8") as f:
                 return {**DEFAULT_SETTINGS, **json.load(f)}
         except (OSError, json.JSONDecodeError):
-            return DEFAULT_SETTINGS.copy()
+            pass
     return DEFAULT_SETTINGS.copy()
 
 
 def save_settings(settings: dict) -> None:
+    """Zapisuje ustawienia do pliku JSON."""
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
 
 
-def parse_float(value: str, default: float, minimum: float, maximum: float) -> float:
+def _parse_float(value, default: float, lo: float, hi: float) -> float:
+    """Parsuje wartosc float z ograniczeniem zakresu."""
     try:
-        parsed = float(value)
+        return max(lo, min(hi, float(value)))
     except (TypeError, ValueError):
         return default
-    return max(minimum, min(maximum, parsed))
 
 
-def parse_int(value: str, default: int, minimum: int, maximum: int) -> int:
+def _parse_int(value, default: int, lo: int, hi: int) -> int:
+    """Parsuje wartosc int z ograniczeniem zakresu."""
     try:
-        parsed = int(value)
+        return max(lo, min(hi, int(value)))
     except (TypeError, ValueError):
         return default
-    return max(minimum, min(maximum, parsed))
+
+
+def _max_columns(sheets: dict) -> int:
+    """Zwraca maksymalna liczbe kolumn sposrod wszystkich arkuszy."""
+    cols = 0
+    for payload in sheets.values():
+        df = payload.get("dataframe")
+        if df is not None and not df.empty:
+            cols = max(cols, df.shape[1])
+    return cols
 
 
 @app.route("/")
@@ -69,6 +84,7 @@ def index():
 
 @app.route("/convert", methods=["POST"])
 def convert():
+    """Obsluguje konwersje pliku XLSX na wybrany format."""
     file = request.files.get("file")
     filename = file.filename if file and file.filename else ""
     if not file or not filename.lower().endswith(".xlsx"):
@@ -80,100 +96,68 @@ def convert():
     if alignment not in {"left", "center", "right"}:
         alignment = DEFAULT_SETTINGS["alignment"]
 
-    title = (request.form.get("title") or "").strip()
-    line_spacing_value = request.form.get("line_spacing") or str(
-        DEFAULT_SETTINGS["line_spacing"]
-    )
-    space_after_value = request.form.get("space_after") or str(
-        DEFAULT_SETTINGS["space_after"]
-    )
-
     settings = {
-        "title": title,
+        "title": (request.form.get("title") or "").strip(),
         "alignment": alignment,
-        "line_spacing": parse_float(
-            line_spacing_value,
-            DEFAULT_SETTINGS["line_spacing"],
-            1.0,
-            3.0,
+        "line_spacing": _parse_float(
+            request.form.get("line_spacing"),
+            DEFAULT_SETTINGS["line_spacing"], 1.0, 3.0,
         ),
-        "space_after": parse_int(
-            space_after_value,
-            DEFAULT_SETTINGS["space_after"],
-            0,
-            40,
+        "space_after": _parse_int(
+            request.form.get("space_after"),
+            DEFAULT_SETTINGS["space_after"], 0, 40,
         ),
         "page_numbers": "page_numbers" in request.form,
     }
 
     if "save_settings" in request.form:
-        persistable = {k: v for k, v in settings.items() if k != "title"}
-        save_settings(persistable)
-        flash("Ustawienia zostały zapisane.")
+        save_settings({k: v for k, v in settings.items() if k != "title"})
+        flash("Ustawienia zapisane.")
 
-    ignore_limits = "ignore_limits" in request.form
-
+    # Wczytanie pliku Excel
     try:
         sheets = read_xlsx(file)
     except Exception:
-        app.logger.exception("Failed to read uploaded Excel file: %s", filename)
-        flash("Nie udało się odczytać pliku Excel. Sprawdź, czy plik nie jest uszkodzony.")
+        app.logger.exception("Blad odczytu pliku: %s", filename)
+        flash("Nie udalo sie odczytac pliku Excel.")
         return redirect(url_for("index"))
 
     if not sheets:
         flash("Plik nie zawiera danych do konwersji.")
         return redirect(url_for("index"))
 
-    # Validate sheet dimensions
-    MAX_COLS_LIMIT = 20
-    if not ignore_limits:
-        for sheet_name, sheet_data in sheets.items():
-            df = sheet_data.get("dataframe")
-            if df is not None and df.shape[1] > MAX_COLS_LIMIT:
-                flash(
-                    f"Arkusz '{sheet_name}' ma za dużo kolumn ({df.shape[1]}). "
-                    f"Maksymalna zalecana liczba kolumn to {MAX_COLS_LIMIT}. "
-                    "Zaznacz opcję 'Ignoruj limity', jeśli mimo to chcesz spróbować konwersji."
-                )
-                return redirect(url_for("index"))
+    # Walidacja limitu kolumn dla formatu DOCX
+    max_cols = _max_columns(sheets)
+    if fmt == "docx" and max_cols > MAX_DOCX_COLUMNS:
+        flash(
+            f"Arkusz ma {max_cols} kolumn, a Word obsluguje maksymalnie "
+            f"{MAX_DOCX_COLUMNS}. Wybierz format PDF."
+        )
+        return redirect(url_for("index"))
 
+    # Konwersja
     buf = io.BytesIO()
     base = os.path.splitext(filename)[0]
 
     try:
         if fmt == "docx":
             df_to_docx(sheets, settings, buf)
-            buf.seek(0)
-            return send_file(
-                buf,
-                as_attachment=True,
-                download_name=f"{base}.docx",
-                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-
-        if fmt == "pdf":
+            mimetype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ext = "docx"
+        elif fmt == "pdf":
             df_to_pdf(sheets, settings, buf)
-            buf.seek(0)
-            return send_file(
-                buf,
-                as_attachment=True,
-                download_name=f"{base}.pdf",
-                mimetype="application/pdf",
-            )
+            mimetype = "application/pdf"
+            ext = "pdf"
+        else:
+            flash("Nieznany format wyjsciowy.")
+            return redirect(url_for("index"))
     except Exception as exc:
-        import traceback as _tb
-        tb_str = _tb.format_exc()
-        app.logger.exception(
-            "Conversion failed for file %s with format %s and settings %s",
-            filename,
-            fmt,
-            settings,
-        )
-        flash(f"BŁĄD: {exc}\n\n{tb_str}")
+        app.logger.exception("Blad konwersji: %s -> %s", filename, fmt)
+        flash(f"Blad konwersji: {exc}")
         return redirect(url_for("index"))
 
-    flash("Nieznany format wyjściowy.")
-    return redirect(url_for("index"))
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=f"{base}.{ext}", mimetype=mimetype)
 
 
 if __name__ == "__main__":
