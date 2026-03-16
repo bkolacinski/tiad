@@ -8,7 +8,6 @@ import pandas as pd
 from openpyxl.utils import get_column_letter
 
 DEFAULT_COLUMN_WIDTH = 8.43
-DEFAULT_ROW_HEIGHT = 15.0
 DEFAULT_FONT_SIZE = 11.0
 
 # Mapa kolorow indeksowanych z Excela (standardowa paleta)
@@ -47,7 +46,7 @@ def _extract_fill_color(fill) -> str | None:
     if not fill or getattr(fill, "patternType", None) not in {"solid", "gray125"}:
         return None
     return _normalize_color(getattr(fill, "fgColor", None)) or \
-           _normalize_color(getattr(fill, "start_color", None))
+        _normalize_color(getattr(fill, "start_color", None))
 
 
 def _extract_border(border) -> dict:
@@ -85,6 +84,7 @@ def _extract_font(font) -> dict:
         "size": float(font.sz) if font.sz is not None else DEFAULT_FONT_SIZE,
         "bold": bool(font.b),
         "italic": bool(font.i),
+        "underline": bool(font.u),
         "color": _normalize_color(getattr(font, "color", None)),
     }
 
@@ -100,13 +100,17 @@ def _extract_cell_style(cell) -> dict:
     }
 
 
-def _collect_merged_map(ws) -> dict[tuple[int, int], dict]:
-    """Tworzy mape scalonych komorek dla arkusza."""
+def _collect_merged_map(ws, n_rows: int, n_cols: int) -> dict[tuple[int, int], dict]:
+    """Tworzy mape scalonych komorek dla arkusza, przycinajac do zakresu danych."""
     merged_map: dict[tuple[int, int], dict] = {}
 
     for merged_range in ws.merged_cells.ranges:
         min_col, min_row = merged_range.min_col, merged_range.min_row
-        max_col, max_row = merged_range.max_col, merged_range.max_row
+        max_col = min(merged_range.max_col, n_cols)
+        max_row = min(merged_range.max_row, n_rows)
+
+        if min_row > n_rows or min_col > n_cols:
+            continue
 
         meta = {
             "range": str(merged_range),
@@ -181,6 +185,33 @@ def _collect_cells_metadata(ws, n_rows: int, n_cols: int,
     return cells_meta
 
 
+def _find_used_range(ws) -> tuple[int, int]:
+    """Znajduje faktyczny zakres danych (pomija puste wiersze/kolumny na koncu)."""
+    max_row_raw = ws.max_row or 0
+    max_col_raw = ws.max_column or 0
+
+    if max_row_raw == 0 or max_col_raw == 0:
+        return 0, 0
+
+    last_col = 0
+    for row in ws.iter_rows(min_row=1, max_row=max_row_raw,
+                            min_col=1, max_col=max_col_raw):
+        for cell in reversed(row):
+            if cell.value is not None:
+                last_col = max(last_col, cell.column)
+                break
+
+    last_row = 0
+    for row in ws.iter_rows(min_row=1, max_row=max_row_raw,
+                            min_col=1, max_col=max(last_col, 1)):
+        for cell in row:
+            if cell.value is not None:
+                last_row = max(last_row, cell.row)
+                break
+
+    return last_row, last_col
+
+
 def read_xlsx(file) -> dict[str, dict]:
     """
     Wczytuje plik Excel i wyciaga dane oraz formatowanie dla kazdego arkusza.
@@ -197,13 +228,12 @@ def read_xlsx(file) -> dict[str, dict]:
 
     for name in wb.sheetnames:
         ws = wb[name]
-        n_rows = ws.max_row or 0
-        n_cols = ws.max_column or 0
+        n_rows, n_cols = _find_used_range(ws)
 
         if n_rows == 0 or n_cols == 0:
             continue
 
-        merged_map = _collect_merged_map(ws)
+        merged_map = _collect_merged_map(ws, n_rows, n_cols)
         df = _build_dataframe(ws, n_rows, n_cols)
         cells_meta = _collect_cells_metadata(ws, n_rows, n_cols, merged_map)
         col_widths = _collect_column_widths(ws, n_cols)

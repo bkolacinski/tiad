@@ -1,234 +1,278 @@
 <!doctype html>
 <html lang="pl">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Konwerter XLSX</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Konwerter XLSX</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
 
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 15px;
-      line-height: 1.5;
-      color: #222;
-      background: #f5f5f5;
-      padding: 60px 20px;
-    }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 15px;
+            line-height: 1.5;
+            color: #222;
+            background: #f5f5f5;
+            padding: 60px 20px;
+        }
 
-    .wrap {
-      max-width: 540px;
-      margin: 0 auto;
-      background: #fff;
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      padding: 40px 36px;
-    }
+        .wrap {
+            max-width: 540px;
+            margin: 0 auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 40px 36px;
+        }
 
-    h1 {
-      font-size: 20px;
-      font-weight: 600;
-      text-align: center;
-      margin-bottom: 32px;
-    }
+        h1 {
+            font-size: 20px;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 32px;
+        }
 
-    .flash {
-      background: #fff3cd;
-      border: 1px solid #e0c97a;
-      padding: 10px 14px;
-      font-size: 13px;
-      border-radius: 4px;
-      margin-bottom: 24px;
-    }
+        .flash {
+            background: #fff3cd;
+            border: 1px solid #e0c97a;
+            padding: 10px 14px;
+            font-size: 13px;
+            border-radius: 4px;
+            margin-bottom: 24px;
+        }
 
-    .section {
-      margin-bottom: 28px;
-    }
+        .section {
+            margin-bottom: 28px;
+        }
 
-    .section-title {
-      font-size: 11px;
-      font-weight: 600;
-      color: #999;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      margin-bottom: 14px;
-      padding-bottom: 6px;
-      border-bottom: 1px solid #eee;
-    }
+        .section-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 14px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #eee;
+        }
 
-    label {
-      display: block;
-      font-size: 13px;
-      color: #555;
-      margin-bottom: 5px;
-    }
+        label {
+            display: block;
+            font-size: 13px;
+            color: #555;
+            margin-bottom: 5px;
+        }
 
-    .field {
-      margin-bottom: 18px;
-    }
+        .field {
+            margin-bottom: 18px;
+        }
 
-    input[type="text"],
-    input[type="number"],
-    select {
-      width: 100%;
-      padding: 9px 10px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      font: inherit;
-      font-size: 14px;
-      background: #fff;
-    }
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 9px 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font: inherit;
+            font-size: 14px;
+            background: #fff;
+        }
 
-    input[type="file"] {
-      font: inherit;
-      font-size: 14px;
-      padding: 6px 0;
-    }
+        input[type="file"] {
+            font: inherit;
+            font-size: 14px;
+            padding: 6px 0;
+        }
 
-    input:focus, select:focus {
-      outline: none;
-      border-color: #888;
-    }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #888;
+        }
 
-    .two-col {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-    }
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
 
-    .fmt-row {
-      display: flex;
-      gap: 0;
-      margin-bottom: 18px;
-    }
-    .fmt-row input[type="radio"] { display: none; }
-    .fmt-row label {
-      flex: 1;
-      text-align: center;
-      padding: 9px 12px;
-      border: 1px solid #ccc;
-      cursor: pointer;
-      font-size: 14px;
-      color: #555;
-      margin: 0;
-    }
-    .fmt-row label:first-of-type { border-radius: 4px 0 0 4px; }
-    .fmt-row label:last-of-type  { border-radius: 0 4px 4px 0; border-left: none; }
-    .fmt-row input:checked + label {
-      background: #222;
-      color: #fff;
-      border-color: #222;
-    }
+        .fmt-row {
+            display: flex;
+            gap: 0;
+            margin-bottom: 18px;
+        }
 
-    .check {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .check input { width: auto; }
-    .check label { margin: 0; color: #222; font-size: 14px; }
+        .fmt-row input[type="radio"] {
+            display: none;
+        }
 
-    .actions {
-      display: flex;
-      gap: 10px;
-      margin-top: 28px;
-    }
+        .fmt-row label {
+            flex: 1;
+            text-align: center;
+            padding: 9px 12px;
+            border: 1px solid #ccc;
+            cursor: pointer;
+            font-size: 14px;
+            color: #555;
+            margin: 0;
+        }
 
-    button {
-      flex: 1;
-      padding: 11px 20px;
-      font: inherit;
-      font-size: 14px;
-      font-weight: 500;
-      border-radius: 4px;
-      cursor: pointer;
-      border: 1px solid #222;
-    }
+        .fmt-row label:first-of-type {
+            border-radius: 4px 0 0 4px;
+        }
 
-    .btn-main {
-      background: #222;
-      color: #fff;
-    }
-    .btn-main:hover { background: #444; }
+        .fmt-row label:last-of-type {
+            border-radius: 0 4px 4px 0;
+            border-left: none;
+        }
 
-    .btn-sec {
-      background: #fff;
-      color: #222;
-    }
-    .btn-sec:hover { background: #f5f5f5; }
+        .fmt-row input:checked + label {
+            background: #222;
+            color: #fff;
+            border-color: #222;
+        }
 
-    @media (max-width: 480px) {
-      .wrap { padding: 28px 20px; }
-      .two-col { grid-template-columns: 1fr; }
-      .actions { flex-direction: column; }
-    }
-  </style>
+        .check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .check input {
+            width: auto;
+        }
+
+        .check label {
+            margin: 0;
+            color: #222;
+            font-size: 14px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 28px;
+        }
+
+        button {
+            flex: 1;
+            padding: 11px 20px;
+            font: inherit;
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: 4px;
+            cursor: pointer;
+            border: 1px solid #222;
+        }
+
+        .btn-main {
+            background: #222;
+            color: #fff;
+        }
+
+        .btn-main:hover {
+            background: #444;
+        }
+
+        .btn-sec {
+            background: #fff;
+            color: #222;
+        }
+
+        .btn-sec:hover {
+            background: #f5f5f5;
+        }
+
+        @media (max-width: 480px) {
+            .wrap {
+                padding: 28px 20px;
+            }
+
+            .two-col {
+                grid-template-columns: 1fr;
+            }
+
+            .actions {
+                flex-direction: column;
+            }
+        }
+    </style>
 </head>
 <body>
-  <div class="wrap">
+<div class="wrap">
     <h1>Konwerter XLSX</h1>
 
     {% with messages = get_flashed_messages() %}
-      {% if messages %}
-        {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
-      {% endif %}
+        {% if messages %}
+            {% for m in messages %}
+                <div class="flash">{{ m }}</div>{% endfor %}
+        {% endif %}
     {% endwith %}
 
     <form method="post" action="/convert" enctype="multipart/form-data">
 
-      <div class="section">
-        <div class="section-title">Plik wejsciowy</div>
-        <input type="file" name="file" accept=".xlsx" required>
-      </div>
-
-      <div class="section">
-        <div class="section-title">Format wyjsciowy</div>
-        <div class="fmt-row">
-          <input type="radio" name="format" id="f-docx" value="docx" checked>
-          <label for="f-docx">DOCX</label>
-          <input type="radio" name="format" id="f-pdf" value="pdf">
-          <label for="f-pdf">PDF</label>
+        <div class="section">
+            <div class="section-title">Plik wejsciowy</div>
+            <input type="file" name="file" accept=".xlsx" required>
         </div>
-        <div class="field">
-          <label for="title">Tytul dokumentu (opcjonalnie)</label>
-          <input type="text" name="title" id="title" placeholder="np. Raport kwartalny">
-        </div>
-      </div>
 
-      <div class="section">
-        <div class="section-title">Ustawienia strony</div>
-        <div class="two-col">
-          <div class="field">
-            <label for="alignment">Wyrownanie tekstu</label>
-            <select name="alignment" id="alignment">
-              <option value="left" {% if settings.alignment == 'left' %}selected{% endif %}>Do lewej</option>
-              <option value="center" {% if settings.alignment == 'center' %}selected{% endif %}>Wycentrowane</option>
-              <option value="right" {% if settings.alignment == 'right' %}selected{% endif %}>Do prawej</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="ls">Interlinia</label>
-            <input type="number" name="line_spacing" id="ls" step="0.05" min="1" max="3" value="{{ settings.line_spacing }}">
-          </div>
-          <div class="field">
-            <label for="sa">Odstep po akapicie (pt)</label>
-            <input type="number" name="space_after" id="sa" step="1" min="0" max="40" value="{{ settings.space_after }}">
-          </div>
-          <div class="field">
-            <div class="check">
-              <input type="checkbox" name="page_numbers" id="pn" {% if settings.page_numbers %}checked{% endif %}>
-              <label for="pn">Numeracja stron</label>
+        <div class="section">
+            <div class="section-title">Format wyjsciowy</div>
+            <div class="fmt-row">
+                <input type="radio" name="format" id="f-docx" value="docx" checked>
+                <label for="f-docx">DOCX</label>
+                <input type="radio" name="format" id="f-pdf" value="pdf">
+                <label for="f-pdf">PDF</label>
             </div>
-          </div>
+            <div class="field">
+                <label for="title">Tytul dokumentu (opcjonalnie)</label>
+                <input type="text" name="title" id="title" placeholder="np. Raport kwartalny">
+            </div>
         </div>
-      </div>
 
-      <div class="actions">
-        <button type="submit" class="btn-main">Konwertuj i pobierz</button>
-        <button type="submit" name="save_settings" value="1" class="btn-sec">Zapisz ustawienia</button>
-      </div>
+        <div class="section">
+            <div class="section-title">Ustawienia strony</div>
+            <div class="two-col">
+                <div class="field">
+                    <label for="alignment">Wyrownanie tekstu</label>
+                    <select name="alignment" id="alignment">
+                        <option value="left" {% if settings.alignment == 'left' %}selected{% endif %}>Do lewej</option>
+                        <option value="center" {% if settings.alignment == 'center' %}selected{% endif %}>Wycentrowane
+                        </option>
+                        <option value="right" {% if settings.alignment == 'right' %}selected{% endif %}>Do prawej
+                        </option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="ls">Interlinia</label>
+                    <input type="number" name="line_spacing" id="ls" step="0.05" min="1" max="3"
+                           value="{{ settings.line_spacing }}">
+                </div>
+                <div class="field">
+                    <label for="sa">Odstep po akapicie (pt)</label>
+                    <input type="number" name="space_after" id="sa" step="1" min="0" max="40"
+                           value="{{ settings.space_after }}">
+                </div>
+                <div class="field">
+                    <div class="check">
+                        <input type="checkbox" name="page_numbers" id="pn"
+                               {% if settings.page_numbers %}checked{% endif %}>
+                        <label for="pn">Numeracja stron</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button type="submit" class="btn-main">Konwertuj i pobierz</button>
+            <button type="submit" name="save_settings" value="1" class="btn-sec">Zapisz ustawienia</button>
+        </div>
 
     </form>
-  </div>
+</div>
 </body>
 </html>

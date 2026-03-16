@@ -24,9 +24,6 @@ EXCEL_ALIGN_MAP = {
     "right": WD_ALIGN_PARAGRAPH.RIGHT,
 }
 
-# Minimalna szerokosc kolumny w twipach (~1 cm)
-MIN_COL_TWIPS = 567
-
 # Domyslna szerokosc kolumny w jednostkach Excela
 DEFAULT_EXCEL_WIDTH = 8.43
 
@@ -66,15 +63,7 @@ def _normalize_widths(excel_widths: list, n_cols: int) -> list[float]:
 def _scale_widths_to_twips(excel_widths: list[float], available_twips: int) -> list[int]:
     """Skaluje szerokosci kolumn z Excela proporcjonalnie do szerokosci strony (twips)."""
     total = sum(excel_widths) or 1
-    scaled = [int(available_twips * w / total) for w in excel_widths]
-    # Zapewnienie minimalnej szerokosci
-    twips = [max(w, MIN_COL_TWIPS) for w in scaled]
-    # Ponowne skalowanie jesli suma przekracza dostepna szerokosc
-    total_tw = sum(twips)
-    if total_tw > available_twips:
-        factor = available_twips / total_tw
-        twips = [max(int(w * factor), MIN_COL_TWIPS) for w in twips]
-    return twips
+    return [max(int(available_twips * w / total), 1) for w in excel_widths]
 
 
 def _get_font_scale(max_cols: int) -> float:
@@ -156,6 +145,8 @@ def _apply_cell_formatting(cell, style: dict, font_scale: float,
                 run.bold = True
             if font_info.get("italic"):
                 run.italic = True
+            if font_info.get("underline"):
+                run.underline = True
             color = _parse_rgb(font_info.get("color"))
             if color:
                 run.font.color.rgb = color
@@ -169,24 +160,23 @@ def _get_cell_meta(cells: list, row: int, col: int) -> dict:
         return {}
 
 
-def _setup_page(doc: Document, max_cols: int) -> tuple:
-    """Konfiguruje rozmiar i orientacje strony. Zwraca (section, available_twips)."""
-    section = doc.sections[0]
+def _setup_section(section, n_cols: int) -> int:
+    """Konfiguruje rozmiar i orientacje sekcji. Zwraca available_twips."""
     section.top_margin = Cm(2.0)
     section.bottom_margin = Cm(2.0)
     section.left_margin = Cm(2.0)
     section.right_margin = Cm(2.0)
 
-    if max_cols > 6:
+    if n_cols > 6:
         section.orientation = WD_ORIENT.LANDSCAPE
         section.page_width, section.page_height = Cm(29.7), Cm(21.0)
     else:
         section.orientation = WD_ORIENT.PORTRAIT
         section.page_width, section.page_height = Cm(21.0), Cm(29.7)
 
-    margins_twips = int((section.left_margin.pt + section.right_margin.pt) * 20)
+    margin_twips = int(Cm(2.0).pt * 20) * 2
     page_w_twips = int(section.page_width.pt * 20)
-    return section, page_w_twips - margins_twips
+    return page_w_twips - margin_twips
 
 
 def _add_sheet_table(doc: Document, df: pd.DataFrame, cells: list,
@@ -246,13 +236,11 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
 
     # Przygotowanie danych arkuszy
     prepared = {}
-    max_cols = 1
     for name, payload in sheets.items():
         df = payload.get("dataframe")
         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
             continue
         df = df.fillna("")
-        max_cols = max(max_cols, df.shape[1])
         prepared[name] = {
             "df": df,
             "widths": _normalize_widths(payload.get("excel_col_widths", []), df.shape[1]),
@@ -265,15 +253,24 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
 
     # Konfiguracja dokumentu
     doc = Document()
-    section, available_twips = _setup_page(doc, max_cols)
-    font_scale = _get_font_scale(max_cols)
 
     if title:
         heading = doc.add_heading(title, level=0)
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Generowanie tabel dla kazdego arkusza
-    for sheet_name, data in prepared.items():
+    # Generowanie tabel dla kazdego arkusza - kazdy na osobnej stronie
+    for idx, (sheet_name, data) in enumerate(prepared.items()):
+        n_cols = data["df"].shape[1]
+        font_scale = _get_font_scale(n_cols)
+
+        if idx == 0:
+            section = doc.sections[0]
+            available_twips = _setup_section(section, n_cols)
+        else:
+            doc.add_section()
+            section = doc.sections[-1]
+            available_twips = _setup_section(section, n_cols)
+
         if len(prepared) > 1:
             doc.add_heading(sheet_name, level=1).alignment = alignment
 
@@ -284,6 +281,7 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
         )
 
     if page_numbers:
-        _add_page_numbers(section.footer)
+        for section in doc.sections:
+            _add_page_numbers(section.footer)
 
     doc.save(output)
