@@ -1,5 +1,3 @@
-"""Aplikacja Flask do konwersji plików XLSX na DOCX/PDF."""
-
 import io
 import json
 import logging
@@ -157,7 +155,8 @@ def convert():
         return redirect(url_for("index"))
 
     buf.seek(0)
-    return send_file(buf, as_attachment=True, download_name=f"{base}.{ext}", mimetype=mimetype)
+    return send_file(buf, as_attachment=True, download_name=f"{base}.{ext}",
+                     mimetype=mimetype)
 
 
 if __name__ == "__main__":

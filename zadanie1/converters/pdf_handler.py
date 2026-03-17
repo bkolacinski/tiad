@@ -13,26 +13,24 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, \
+    TableStyle
 
-# Mapowanie wyrownan
+# Alignment mapping
 ALIGN_MAP = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
 
-# Mapowanie wyrownan z Excela
-EXCEL_ALIGN_MAP = {
-    "left": "left", "general": "left",
-    "center": "center", "centre": "center",
-    "right": "right", "justify": "left",
-}
+# Excel alignments mapping to match Reportlab's understanding
+EXCEL_ALIGN_MAP = {"left": "left", "general": "left", "center": "center",
+                   "centre": "center", "right": "right", "justify": "left", }
 
-# Stale
+# Style
 GRID_COLOR = colors.Color(0.82, 0.82, 0.82)
 MARGIN = 1.5 * cm
 DEFAULT_EXCEL_WIDTH = 8.43
 EXCEL_CHAR_TO_PT = 7.0
 LABEL_COLUMN_MIN_WIDTH_PT = 36.0
 
-# Domyslne czcionki (nadpisywane przez _register_fonts)
+# Default fonts
 _FONT = "Helvetica"
 _FONT_BOLD = "Helvetica-Bold"
 _FONT_ITALIC = "Helvetica-Oblique"
@@ -40,47 +38,32 @@ _FONT_BOLD_ITALIC = "Helvetica-BoldOblique"
 
 
 def _register_fonts() -> None:
-    """Rejestruje czcionki z systemu (4 warianty) obslugujace polskie znaki."""
     global _FONT, _FONT_BOLD, _FONT_ITALIC, _FONT_BOLD_ITALIC
-    candidates = [
-        {
-            "regular": "C:/Windows/Fonts/arial.ttf",
-            "bold": "C:/Windows/Fonts/arialbd.ttf",
-            "italic": "C:/Windows/Fonts/ariali.ttf",
-            "bold_italic": "C:/Windows/Fonts/arialbi.ttf",
-            "family": "ArialPL",
-        },
-        {
-            "regular": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-            "bold_italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
-            "family": "DejaVuSans",
-        },
-    ]
+    candidates = [{"regular": "C:/Windows/Fonts/arial.ttf",
+                   "bold": "C:/Windows/Fonts/arialbd.ttf",
+                   "italic": "C:/Windows/Fonts/ariali.ttf",
+                   "bold_italic": "C:/Windows/Fonts/arialbi.ttf",
+                   "family": "ArialPL", },
+                  {"regular": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                   "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                   "italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+                   "bold_italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+                   "family": "DejaVuSans", }, ]
     for c in candidates:
         paths = [c["regular"], c["bold"], c["italic"], c["bold_italic"]]
         if not all(os.path.exists(p) for p in paths):
             continue
         try:
             fam = c["family"]
-            names = {
-                "regular": fam,
-                "bold": f"{fam}-Bold",
-                "italic": f"{fam}-Italic",
-                "bold_italic": f"{fam}-BoldItalic",
-            }
+            names = {"regular": fam, "bold": f"{fam}-Bold", "italic": f"{fam}-Italic",
+                     "bold_italic": f"{fam}-BoldItalic", }
             pdfmetrics.registerFont(TTFont(names["regular"], c["regular"]))
             pdfmetrics.registerFont(TTFont(names["bold"], c["bold"]))
             pdfmetrics.registerFont(TTFont(names["italic"], c["italic"]))
             pdfmetrics.registerFont(TTFont(names["bold_italic"], c["bold_italic"]))
-            pdfmetrics.registerFontFamily(
-                fam,
-                normal=names["regular"],
-                bold=names["bold"],
-                italic=names["italic"],
-                boldItalic=names["bold_italic"],
-            )
+            pdfmetrics.registerFontFamily(fam, normal=names["regular"],
+                                          bold=names["bold"], italic=names["italic"],
+                                          boldItalic=names["bold_italic"], )
             _FONT = names["regular"]
             _FONT_BOLD = names["bold"]
             _FONT_ITALIC = names["italic"]
@@ -93,13 +76,13 @@ def _register_fonts() -> None:
 _register_fonts()
 
 
-# ---------------------------------------------------------------------------
-# Funkcje pomocnicze
-# ---------------------------------------------------------------------------
-
-
-def _parse_color(value: Any) -> colors.Color | None:
-    """Konwertuje kolor hex na obiekt Color reportlab."""
+def _parse_color(value: str | colors.Color) -> colors.Color | None:
+    """
+    Converts hex color to Reportlab Color object.
+    :param value: Hex color in formats like "#RRGGBB", "#AARRGGBB",
+    or a reportlab Color object.
+    :return: Reportlab Color object or None if parsing fails.
+    """
     if isinstance(value, colors.Color):
         return value
     if not isinstance(value, str):
@@ -110,24 +93,32 @@ def _parse_color(value: Any) -> colors.Color | None:
     if len(raw) != 6:
         return None
     try:
-        return colors.Color(
-            int(raw[0:2], 16) / 255,
-            int(raw[2:4], 16) / 255,
-            int(raw[4:6], 16) / 255,
-        )
+        return colors.Color(int(raw[0:2], 16) / 255, int(raw[2:4], 16) / 255,
+                            int(raw[4:6], 16) / 255, )
     except ValueError:
         return None
 
 
 def _get_alignment(h_align: Any, fallback: str) -> str:
-    """Mapuje wyrownanie z Excela na nazwe zrozumiala dla PDF."""
+    """
+    Maps excel alignment to PDF
+    :param h_align: Excel horizontal alignment value
+    :param fallback: Fallback alignment value
+    :return: PDF alignment value
+    """
     if isinstance(h_align, str):
         return EXCEL_ALIGN_MAP.get(h_align.lower().strip(), fallback)
     return fallback
 
 
 def _get_cell_meta(cells: list, row: int, col: int) -> dict:
-    """Zwraca metadane komorki lub pusty slownik."""
+    """
+    Gets cell metadata
+    :param cells: List of cells
+    :param row: Row of desired cell
+    :param col: Column of desired cell
+    :return: Metadata of the cell or empty dict if not found
+    """
     try:
         return cells[row][col]
     except (IndexError, TypeError):
@@ -135,7 +126,13 @@ def _get_cell_meta(cells: list, row: int, col: int) -> dict:
 
 
 def _normalize_excel_widths(excel_widths: list, n_cols: int) -> list[float]:
-    """Uzupelnia brakujace szerokosci kolumn wartosciami domyslnymi."""
+    """
+    Fills empty values in Excel widths with default width
+    :param excel_widths: List of Excel widths
+    :param n_cols: Number of columns
+    :return: List of all Excel column widths, with missing values filled
+    with default width.
+    """
     widths = list(excel_widths[:n_cols])
     while len(widths) < n_cols:
         widths.append(DEFAULT_EXCEL_WIDTH)
@@ -143,7 +140,13 @@ def _normalize_excel_widths(excel_widths: list, n_cols: int) -> list[float]:
 
 
 def _get_label_columns(cells: list, merges: list, n_cols: int) -> set[int]:
-    """Wykrywa kolumny z jednokolumnowymi, wielowierszowymi etykietami."""
+    """
+    Detects columns that contain single-column, multi-row labels
+    :param cells: List of cells
+    :param merges: List of merges
+    :param n_cols: Number of columns
+    :return: Set of columns that contain single-column
+    """
     label_cols: set[int] = set()
     for merge in merges:
         start_col = merge.get("start_col")
@@ -172,9 +175,17 @@ def _get_label_columns(cells: list, merges: list, n_cols: int) -> set[int]:
     return label_cols
 
 
-def _col_widths_pts(excel_widths: list, n_cols: int, available_pt: float,
-                    cells: list, merges: list) -> list[float]:
-    """Przelicza szerokosci kolumn z Excela na punkty z rezerwa dla kolumn etykiet."""
+def _col_widths_pts(excel_widths: list, n_cols: int, available_pt: float, cells: list,
+                    merges: list) -> list[float]:
+    """
+    Converts excel widths into PDF widths
+    :param excel_widths: List of Excel widths
+    :param n_cols: Number of columns
+    :param available_pt: Avil
+    :param cells: List of cells
+    :param merges: List of merges
+    :return: List of PDF column widths
+    """
     widths = _normalize_excel_widths(excel_widths, n_cols)
 
     natural = [w * EXCEL_CHAR_TO_PT for w in widths]
@@ -186,10 +197,8 @@ def _col_widths_pts(excel_widths: list, n_cols: int, available_pt: float,
     if not label_cols:
         return scaled
 
-    reserved_widths = {
-        idx: max(scaled[idx], LABEL_COLUMN_MIN_WIDTH_PT)
-        for idx in sorted(label_cols)
-    }
+    reserved_widths = {idx: max(scaled[idx], LABEL_COLUMN_MIN_WIDTH_PT) for idx in
+                       sorted(label_cols)}
     reserved_total = sum(reserved_widths.values())
     if reserved_total >= available_pt:
         return scaled
@@ -213,7 +222,11 @@ def _col_widths_pts(excel_widths: list, n_cols: int, available_pt: float,
 
 
 def _get_font_scale(n_cols: int) -> float:
-    """Dobiera skale czcionki w zaleznosci od liczby kolumn."""
+    """
+    Chooses font scale depending on column count
+    :param n_cols: Number of columns
+    :return: Font scale, a number between 0.3 and 1.0
+    """
     if n_cols <= 10:
         return 1.0
     if n_cols <= 15:
@@ -228,7 +241,11 @@ def _get_font_scale(n_cols: int) -> float:
 
 
 def _get_padding(n_cols: int) -> float:
-    """Dobiera padding komorek w zaleznosci od liczby kolumn."""
+    """
+    Chooses padding depending on column count
+    :param n_cols: Number of columns
+    :return: Padding value, a number between 0.5 and 4.0
+    """
     if n_cols <= 20:
         return 4.0
     if n_cols <= 40:
@@ -239,16 +256,22 @@ def _get_padding(n_cols: int) -> float:
 
 
 def _border_weight(style_name: str) -> float:
-    """Zwraca grubosc obramowania dla danego stylu z Excela."""
-    return {
-        "thin": 0.5, "medium": 1.0, "thick": 1.5,
-        "hair": 0.25, "double": 1.0, "dotted": 0.5,
-        "dashed": 0.5, "mediumDashed": 1.0,
-    }.get(style_name, 0.5)
+    """
+    Chooses border weight depending on style
+    :param style_name: Name of style
+    :return: Border weight in points, a number between 0.25 and 1.5 (defaults to 0.5)
+    """
+    return {"thin": 0.5, "medium": 1.0, "thick": 1.5, "hair": 0.25, "double": 1.0,
+            "dotted": 0.5, "dashed": 0.5, "mediumDashed": 1.0, }.get(style_name, 0.5)
 
 
 def _page_number_callback(canvas, doc) -> None:
-    """Rysuje numer strony na srodku stopki."""
+    """
+    Prints page number at the bottom of the page
+    :param canvas: Canvas
+    :param doc: Document object
+    :return: None
+    """
     canvas.saveState()
     canvas.setFont(_FONT, 8)
     canvas.setFillColor(colors.Color(0.5, 0.5, 0.5))
@@ -256,42 +279,35 @@ def _page_number_callback(canvas, doc) -> None:
     canvas.restoreState()
 
 
-# ---------------------------------------------------------------------------
-# Budowanie tabeli
-# ---------------------------------------------------------------------------
-
-
-def _build_table_data(df: pd.DataFrame, cells: list, merges: list,
-                      font_scale: float, global_align: str,
-                      padding: float) -> tuple[list, list]:
+def _build_table_data(df: pd.DataFrame, cells: list, merges: list, font_scale: float,
+                      global_align: str, padding: float) -> tuple[list, list]:
     """
-    Buduje dane i style tabeli dla reportlab.
-
-    Returns:
-        (data, style_cmds) - dane wierszy i lista polecen stylu
+    Creates table data for Reportlab based on DataFrame, cell metadata and merges.
+    :param df: DataFrame with cell contents
+    :param cells: List of cell
+    :param merges: List of merges
+    :param font_scale: Font scale
+    :param global_align: Global alignment
+    :param padding: Padding for cells
+    :return: Data of rows and style commands
     """
     n_rows, n_cols = df.shape
 
-    # Bazowe style tabeli
-    style_cmds = [
-        ("GRID", (0, 0), (-1, -1), 0.25, GRID_COLOR),
-        ("LEFTPADDING", (0, 0), (-1, -1), padding),
-        ("RIGHTPADDING", (0, 0), (-1, -1), padding),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]
+    # Base styles
+    style_cmds = [("GRID", (0, 0), (-1, -1), 0.25, GRID_COLOR),
+                  ("LEFTPADDING", (0, 0), (-1, -1), padding),
+                  ("RIGHTPADDING", (0, 0), (-1, -1), padding),
+                  ("TOPPADDING", (0, 0), (-1, -1), 2),
+                  ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                  ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ]
 
-    # Scalenia komorek
+    # Merged cells
     for merge in merges:
         if merge.get("is_anchor"):
-            style_cmds.append((
-                "SPAN",
-                (merge["start_col"], merge["start_row"]),
-                (merge["end_col"], merge["end_row"]),
-            ))
+            style_cmds.append(
+                ("SPAN", (int(merge["start_col"]), int(merge["start_row"])),
+                 (int(merge["end_col"]), int(merge["end_row"]))))
 
-    # Budowanie wierszy danych
     data = []
     for row_i in range(n_rows):
         row_data = []
@@ -302,11 +318,12 @@ def _build_table_data(df: pd.DataFrame, cells: list, merges: list,
                 row_data.append("")
                 continue
 
-            # Wartosc komorki
-            value = meta.get("value") if meta.get("value") is not None else str(df.iat[row_i, col_j])
+            # Cell value
+            value = meta.get("value") if meta.get("value") is not None else str(
+                df.iat[row_i, col_j])
             text = escape(str(value)).replace("\n", "<br/>")
 
-            # Styl czcionki
+            # Font style
             style = meta.get("style", {})
             font = style.get("font") or {}
             fg = _parse_color(font.get("color")) or colors.black
@@ -315,7 +332,6 @@ def _build_table_data(df: pd.DataFrame, cells: list, merges: list,
             italic = bool(font.get("italic"))
             underline = bool(font.get("underline"))
 
-            # Dobor wariantu czcionki
             if bold and italic:
                 font_name = _FONT_BOLD_ITALIC
             elif bold:
@@ -325,34 +341,29 @@ def _build_table_data(df: pd.DataFrame, cells: list, merges: list,
             else:
                 font_name = _FONT
 
-            # Tagi HTML dla podkreslenia
+            # HTML tags for underline
             if underline:
                 text = f"<u>{text}</u>"
 
             h_align = (style.get("alignment") or {}).get("horizontal")
             align = _get_alignment(h_align, global_align)
 
-            para_style = ParagraphStyle(
-                name=f"c_{row_i}_{col_j}",
-                fontName=font_name,
-                fontSize=font_size,
-                leading=font_size * 1.25,
-                alignment=ALIGN_MAP.get(align, TA_LEFT),
-                textColor=fg,
-            )
+            para_style = ParagraphStyle(name=f"c_{row_i}_{col_j}", fontName=font_name,
+                                        fontSize=font_size, leading=font_size * 1.25,
+                                        alignment=ALIGN_MAP.get(align, TA_LEFT),
+                                        textColor=fg, )
             row_data.append(Paragraph(text, para_style))
 
-            # Kolor tla
+            # Background
             fill_color = _parse_color((style.get("fill") or {}).get("color"))
             if fill_color:
-                style_cmds.append(("BACKGROUND", (col_j, row_i), (col_j, row_i), fill_color))
+                style_cmds.append(
+                    ("BACKGROUND", (col_j, row_i), (col_j, row_i), fill_color))
 
-            # Obramowania
+            # Frame
             border_info = style.get("border") or {}
-            border_map = {
-                "top": "LINEABOVE", "bottom": "LINEBELOW",
-                "left": "LINEBEFORE", "right": "LINEAFTER",
-            }
+            border_map = {"top": "LINEABOVE", "bottom": "LINEBELOW",
+                          "left": "LINEBEFORE", "right": "LINEAFTER", }
             for side, cmd in border_map.items():
                 bdata = border_info.get(side)
                 if bdata:
@@ -365,89 +376,72 @@ def _build_table_data(df: pd.DataFrame, cells: list, merges: list,
     return data, style_cmds
 
 
-# ---------------------------------------------------------------------------
-# Funkcja glowna
-# ---------------------------------------------------------------------------
-
-
 def df_to_pdf(sheets: dict, settings: dict, output) -> None:
     """
-    Konwertuje arkusze Excel na dokument PDF.
-
-    Args:
-        sheets: slownik {nazwa_arkusza: dane} z read_xlsx()
-        settings: ustawienia formatowania (alignment, page_numbers, itp.)
-        output: bufor wyjsciowy (BytesIO)
+    Converts a pandas dataframe into an Excel file.
+    :param sheets: Dictionary of sheet names to dataframes and metadata,
+    as returned by read_xlsx()
+    :param settings: Dictionary of settings (alignment, page_numbers, etc.)
+    :param output: Output buffer (BytesIO) to write the PDF content to.
+    :return: None
     """
     alignment = settings.get("alignment", "left")
     page_numbers = bool(settings.get("page_numbers", True))
     title = (settings.get("title") or "").strip()
 
-    # Przygotowanie danych arkuszy
     prepared = []
     for name, payload in sheets.items():
         df = payload.get("dataframe")
         if not isinstance(df, pd.DataFrame) or df.empty:
             continue
         df = df.fillna("")
-        prepared.append((
-            name, df,
-            payload.get("excel_col_widths", []),
-            payload.get("cells", []),
-            payload.get("merges", []),
-        ))
+        prepared.append(
+            (name, df, payload.get("excel_col_widths", []), payload.get("cells", []),
+             payload.get("merges", []),))
 
     if not prepared:
         return
 
-    # Rozmiar strony: portrait A4 lub landscape A4
     max_cols = max(df.shape[1] for _, df, *_ in prepared)
     page_size = A4 if max_cols <= 6 else make_landscape(A4)
     available_pt = page_size[0] - 2 * MARGIN
 
-    doc = SimpleDocTemplate(
-        output, pagesize=page_size,
-        leftMargin=MARGIN, rightMargin=MARGIN,
-        topMargin=MARGIN,
-        bottomMargin=2.0 * cm if page_numbers else MARGIN,
-    )
+    doc = SimpleDocTemplate(output, pagesize=page_size, leftMargin=MARGIN,
+                            rightMargin=MARGIN, topMargin=MARGIN,
+                            bottomMargin=2.0 * cm if page_numbers else MARGIN, )
 
-    # Budowanie zawartosci dokumentu
     story = []
 
     if title:
-        story.append(Paragraph(
-            escape(title),
-            ParagraphStyle("title", fontName=_FONT_BOLD, fontSize=14,
-                           leading=18, alignment=TA_CENTER, spaceAfter=10),
-        ))
+        story.append(Paragraph(escape(title),
+                               ParagraphStyle("title", fontName=_FONT_BOLD, fontSize=14,
+                                              leading=18,
+                                              alignment=TA_CENTER, spaceAfter=10), ))
         story.append(Spacer(1, 0.4 * cm))
 
     for i, (name, df, excel_widths, cells, merges) in enumerate(prepared):
-        # Lamanie strony przed kazdym kolejnym arkuszem
         if i > 0:
             story.append(PageBreak())
 
-        # Skala czcionki i padding per arkusz
+        # Sheet specific font size and padding
         sheet_cols = df.shape[1]
         sheet_font_scale = _get_font_scale(sheet_cols)
         sheet_padding = _get_padding(sheet_cols)
 
-        # Naglowek arkusza (jesli wiele arkuszy)
+        # Sheet name if there are more than one sheet
         if len(prepared) > 1:
-            story.append(Paragraph(
-                escape(name),
-                ParagraphStyle("sheet", fontName=_FONT_BOLD, fontSize=11,
-                               leading=14, textColor=colors.Color(0.22, 0.45, 0.70),
-                               spaceBefore=12, spaceAfter=4),
-            ))
+            story.append(Paragraph(escape(name),
+                                   ParagraphStyle("sheet", fontName=_FONT_BOLD,
+                                                  fontSize=11, leading=14,
+                                                  textColor=colors.Color(0.22, 0.45,
+                                                                         0.70),
+                                                  spaceBefore=12,
+                                                  spaceAfter=4), ))
 
-        col_widths = _col_widths_pts(
-            excel_widths, sheet_cols, available_pt, cells, merges,
-        )
-        table_data, style_cmds = _build_table_data(
-            df, cells, merges, sheet_font_scale, alignment, sheet_padding,
-        )
+        col_widths = _col_widths_pts(excel_widths, sheet_cols, available_pt, cells,
+                                     merges, )
+        table_data, style_cmds = _build_table_data(df, cells, merges, sheet_font_scale,
+                                                   alignment, sheet_padding, )
 
         if not table_data:
             continue
