@@ -33,7 +33,11 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict:
-    """Wczytuje ustawienia z pliku JSON lub zwraca domyslne."""
+    """
+    Loads application settings from a JSON file.
+    :return: Saved settings merged with defaults, or a copy of DEFAULT_SETTINGS
+    if the settings file does not exist or cannot be parsed.
+    """
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, encoding="utf-8") as f:
@@ -44,13 +48,24 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
-    """Zapisuje ustawienia do pliku JSON."""
+    """
+    Persists application settings to a JSON file.
+    :param settings: Dictionary of settings to save.
+    :return: None
+    """
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
 
 
 def _parse_float(value, default: float, lo: float, hi: float) -> float:
-    """Parsuje wartosc float z ograniczeniem zakresu."""
+    """
+    Parses a value as float and clamps it to the given range.
+    :param value: Raw value to parse (typically a string from a form field).
+    :param default: Fallback value if parsing fails.
+    :param lo: Minimum allowed value.
+    :param hi: Maximum allowed value.
+    :return: Parsed and clamped value, or default on parse error.
+    """
     try:
         return max(lo, min(hi, float(value)))
     except (TypeError, ValueError):
@@ -58,7 +73,14 @@ def _parse_float(value, default: float, lo: float, hi: float) -> float:
 
 
 def _parse_int(value, default: int, lo: int, hi: int) -> int:
-    """Parsuje wartosc int z ograniczeniem zakresu."""
+    """
+    Parses a value as int and clamps it to the given range.
+    :param value: Raw value to parse (typically a string from a form field).
+    :param default: Fallback value if parsing fails.
+    :param lo: Minimum allowed value.
+    :param hi: Maximum allowed value.
+    :return: Parsed and clamped value, or default on parse error.
+    """
     try:
         return max(lo, min(hi, int(value)))
     except (TypeError, ValueError):
@@ -66,7 +88,12 @@ def _parse_int(value, default: int, lo: int, hi: int) -> int:
 
 
 def _max_columns(sheets: dict) -> int:
-    """Zwraca maksymalna liczbe kolumn sposrod wszystkich arkuszy."""
+    """
+    Returns the maximum column count across all sheets.
+    :param sheets: Mapping of sheet names to payload dicts containing
+    a dataframe key with a pandas DataFrame.
+    :return: Highest column count found, or 0 if all DataFrames are empty.
+    """
     cols = 0
     for payload in sheets.values():
         df = payload.get("dataframe")
@@ -77,12 +104,22 @@ def _max_columns(sheets: dict) -> int:
 
 @app.route("/")
 def index():
+    """
+    Renders the main converter page.
+    :return: Rendered index.html template with current settings injected.
+    """
     return render_template("index.html", settings=load_settings())
 
 
 @app.route("/convert", methods=["POST"])
 def convert():
-    """Obsluguje konwersje pliku XLSX na wybrany format."""
+    """
+    Handles POST requests to convert an uploaded XLSX file to DOCX or PDF.
+    Reads form fields: file, format, alignment, line_spacing, space_after,
+    page_numbers, title, and optionally save_settings to persist the current settings.
+    :return: A file download response on success, or a redirect to the
+    index page with a flashed error message on failure.
+    """
     file = request.files.get("file")
     filename = file.filename if file and file.filename else ""
     if not file or not filename.lower().endswith(".xlsx"):
@@ -112,7 +149,7 @@ def convert():
         save_settings({k: v for k, v in settings.items() if k != "title"})
         flash("Ustawienia zapisane.")
 
-    # Wczytanie pliku Excel
+    # Read the uploaded Excel file
     try:
         sheets = read_xlsx(file)
     except Exception:
@@ -124,7 +161,7 @@ def convert():
         flash("Plik nie zawiera danych do konwersji.")
         return redirect(url_for("index"))
 
-    # Walidacja limitu kolumn dla formatu DOCX
+    # Validate column count limit for DOCX format
     max_cols = _max_columns(sheets)
     if fmt == "docx" and max_cols > MAX_DOCX_COLUMNS:
         flash(
@@ -133,7 +170,7 @@ def convert():
         )
         return redirect(url_for("index"))
 
-    # Konwersja
+    # Perform the conversion
     buf = io.BytesIO()
     base = os.path.splitext(filename)[0]
 

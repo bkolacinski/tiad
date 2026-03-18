@@ -1,4 +1,4 @@
-"""Konwersja danych z arkuszy Excel do formatu DOCX (Word)."""
+"""Conversion of Excel sheet data to DOCX (Word) format."""
 
 import pandas as pd
 from docx import Document
@@ -8,14 +8,14 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-# Mapowanie nazw wyrownan na stale python-docx
+# Mapping of alignment names to python-docx constants
 ALIGN_MAP = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
     "center": WD_ALIGN_PARAGRAPH.CENTER,
     "right": WD_ALIGN_PARAGRAPH.RIGHT,
 }
 
-# Mapowanie wyrownan z Excela na python-docx
+# Mapping of Excel alignment names to python-docx constants
 EXCEL_ALIGN_MAP = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
     "general": WD_ALIGN_PARAGRAPH.LEFT,
@@ -24,17 +24,21 @@ EXCEL_ALIGN_MAP = {
     "right": WD_ALIGN_PARAGRAPH.RIGHT,
 }
 
-# Domyslna szerokosc kolumny w jednostkach Excela
+# Default column width in Excel units
 DEFAULT_EXCEL_WIDTH = 8.43
 
 
 def _parse_rgb(value) -> RGBColor | None:
-    """Konwertuje kolor hex (#RRGGBB) na obiekt RGBColor."""
+    """
+    Converts hex color string to RGBColor object.
+    :param value: Color value to parse; expected to be a string like "#RRGGBB" or "#AARRGGBB".
+    :return: RGBColor object or None if parsing fails.
+    """
     if not isinstance(value, str):
         return None
     raw = value.strip().lstrip("#")
     if len(raw) == 8:
-        raw = raw[2:]  # Pominiecie kanalu alfa
+        raw = raw[2:]  # Strip alpha channel
     if len(raw) != 6:
         return None
     try:
@@ -44,14 +48,24 @@ def _parse_rgb(value) -> RGBColor | None:
 
 
 def _get_para_alignment(h_align: str | None, fallback) -> WD_ALIGN_PARAGRAPH:
-    """Zwraca wyrownanie akapitu na podstawie nazwy z Excela."""
+    """
+    Resolves paragraph alignment from an Excel horizontal-alignment name.
+    :param h_align: Horizontal alignment string from Excel metadata.
+    :param fallback: Alignment constant to use when h_align is absent or unknown.
+    :return: Resolved WD_ALIGN_PARAGRAPH constant.
+    """
     if isinstance(h_align, str):
         return EXCEL_ALIGN_MAP.get(h_align.lower().strip(), fallback)
     return fallback
 
 
 def _normalize_widths(excel_widths: list, n_cols: int) -> list[float]:
-    """Uzupelnia brakujace szerokosci kolumn wartosciami domyslnymi."""
+    """
+    Fills missing column widths with the default Excel column width.
+    :param excel_widths: Raw column width values from the Excel file.
+    :param n_cols: Expected number of columns.
+    :return: List of n_cols float width values.
+    """
     widths = []
     for w in (excel_widths or [])[:n_cols]:
         widths.append(float(w) if w not in (None, "") else DEFAULT_EXCEL_WIDTH)
@@ -61,13 +75,22 @@ def _normalize_widths(excel_widths: list, n_cols: int) -> list[float]:
 
 
 def _scale_widths_to_twips(excel_widths: list[float], available_twips: int) -> list[int]:
-    """Skaluje szerokosci kolumn z Excela proporcjonalnie do szerokosci strony (twips)."""
+    """
+    Scales Excel column widths proportionally to fit the available page width.
+    :param excel_widths: Column widths in Excel units.
+    :param available_twips: Total available page width in twips.
+    :return: List of column widths in twips, each at least 1.
+    """
     total = sum(excel_widths) or 1
     return [max(int(available_twips * w / total), 1) for w in excel_widths]
 
 
 def _get_font_scale(max_cols: int) -> float:
-    """Dobiera skale czcionki w zaleznosci od liczby kolumn."""
+    """
+    Chooses a font scale factor based on the number of columns.
+    :param max_cols: Number of columns in the widest sheet.
+    :return: Scale factor to apply to the original font size.
+    """
     if max_cols <= 10:
         return 1.0
     if max_cols <= 15:
@@ -78,7 +101,11 @@ def _get_font_scale(max_cols: int) -> float:
 
 
 def _add_page_numbers(footer) -> None:
-    """Dodaje automatyczna numeracje stron w stopce dokumentu."""
+    """
+    Inserts an automatic page-number field into the document footer.
+    :param footer: The footer object of a document section.
+    :return: None
+    """
     para = footer.paragraphs[0]
     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = para.add_run()
@@ -92,7 +119,12 @@ def _add_page_numbers(footer) -> None:
 
 
 def _shade_cell(cell, fill_hex: str) -> None:
-    """Ustawia kolor tla komorki tabeli."""
+    """
+    Applies a background fill color to a table cell.
+    :param cell: The python-docx table cell to shade.
+    :param fill_hex: Hex color string (with or without leading "#").
+    :return: None
+    """
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
@@ -106,7 +138,12 @@ def _shade_cell(cell, fill_hex: str) -> None:
 
 
 def _set_cell_width(cell, width_twips: int) -> None:
-    """Ustawia szerokosc komorki w twipach."""
+    """
+    Sets the explicit width of a table cell in twips.
+    :param cell: The python-docx table cell to resize.
+    :param width_twips: Desired cell width in twips.
+    :return: None
+    """
     tc = cell._tc
     tcPr = tc.get_or_add_tcPr()
     tcW = OxmlElement("w:tcW")
@@ -121,16 +158,25 @@ def _set_cell_width(cell, width_twips: int) -> None:
 def _apply_cell_formatting(cell, style: dict, font_scale: float,
                            line_spacing: float, space_after: int,
                            default_alignment) -> None:
-    """Stosuje formatowanie (czcionka, kolor, wyrownanie) do komorki."""
+    """
+    Applies font, color, and paragraph formatting to a table cell.
+    :param cell: The python-docx table cell to format.
+    :param style: Style metadata with optional font, fill, and alignment sub-dicts.
+    :param font_scale: Multiplier applied to the original font size.
+    :param line_spacing: Line spacing value for all paragraphs in the cell.
+    :param space_after: Space after each paragraph in points.
+    :param default_alignment: Fallback paragraph alignment constant.
+    :return: None
+    """
     font_info = style.get("font") or {}
     fill_info = style.get("fill") or {}
     align_info = style.get("alignment") or {}
 
-    # Kolor tla
+    # Apply background fill color
     if fill_info.get("color"):
         _shade_cell(cell, fill_info["color"])
 
-    # Rozmiar czcionki (skalowany)
+    # Scale font size, enforcing a minimum of 6 pt
     original_size = float(font_info.get("size") or 11.0)
     scaled_size = max(original_size * font_scale, 6.0)
 
@@ -153,7 +199,13 @@ def _apply_cell_formatting(cell, style: dict, font_scale: float,
 
 
 def _get_cell_meta(cells: list, row: int, col: int) -> dict:
-    """Zwraca metadane komorki lub pusty slownik."""
+    """
+    Safely retrieves cell metadata from the nested cells list.
+    :param cells: Nested list of cell metadata dicts from the xlsx reader.
+    :param row: Zero-based row index.
+    :param col: Zero-based column index.
+    :return: Cell metadata dict, or an empty dict if the index is out of range.
+    """
     try:
         return cells[row][col]
     except (IndexError, TypeError):
@@ -161,7 +213,12 @@ def _get_cell_meta(cells: list, row: int, col: int) -> dict:
 
 
 def _setup_section(section, n_cols: int) -> int:
-    """Konfiguruje rozmiar i orientacje sekcji. Zwraca available_twips."""
+    """
+    Configures page size, orientation, and margins for a document section.
+    :param section: The python-docx section object to configure.
+    :param n_cols: Number of columns in the sheet; determines orientation.
+    :return: Available content width in twips after subtracting margins.
+    """
     section.top_margin = Cm(2.0)
     section.bottom_margin = Cm(2.0)
     section.left_margin = Cm(2.0)
@@ -183,12 +240,24 @@ def _add_sheet_table(doc: Document, df: pd.DataFrame, cells: list,
                      merges: list, twip_widths: list[int],
                      font_scale: float, line_spacing: float,
                      space_after: int, default_alignment) -> None:
-    """Tworzy tabele w dokumencie na podstawie danych z jednego arkusza."""
+    """
+    Adds a formatted table for a single sheet to the document.
+    :param doc: Target python-docx Document object.
+    :param df: Sheet data; each cell value is written to the table.
+    :param cells: Nested list of cell metadata dicts (style, merge info, etc.).
+    :param merges: List of merge-range dicts describing merged cell regions.
+    :param twip_widths: Column widths in twips.
+    :param font_scale: Font size multiplier.
+    :param line_spacing: Line spacing for all paragraphs.
+    :param space_after: Space after each paragraph in points.
+    :param default_alignment: Default paragraph alignment constant.
+    :return: None
+    """
     n_rows, n_cols = df.shape
     table = doc.add_table(rows=n_rows, cols=n_cols)
     table.style = "Table Grid"
 
-    # Scalanie komorek
+    # Merge cells according to Excel merge regions
     for merge in merges:
         if merge.get("is_anchor"):
             try:
@@ -198,7 +267,7 @@ def _add_sheet_table(doc: Document, df: pd.DataFrame, cells: list,
             except (IndexError, ValueError):
                 pass
 
-    # Wypelnianie danych i formatowania
+    # Populate cell values and apply formatting
     for row_i in range(n_rows):
         for col_j in range(n_cols):
             meta = _get_cell_meta(cells, row_i, col_j)
@@ -221,12 +290,13 @@ def _add_sheet_table(doc: Document, df: pd.DataFrame, cells: list,
 
 def df_to_docx(sheets: dict, settings: dict, output) -> None:
     """
-    Konwertuje arkusze Excel na dokument Word (DOCX).
-
-    Args:
-        sheets: slownik {nazwa_arkusza: dane} z read_xlsx()
-        settings: ustawienia formatowania (alignment, line_spacing, itp.)
-        output: bufor wyjsciowy (BytesIO)
+    Converts Excel sheet data to a Word document and writes it to output.
+    :param sheets: Mapping of sheet names to payload dicts as returned by read_xlsx().
+    Each payload must contain a dataframe key and may contain excel_col_widths, cells, and merges.
+    :param settings: Formatting settings with keys: alignment, line_spacing, space_after,
+    page_numbers, and title.
+    :param output: Writable binary stream (e.g. BytesIO) that receives the generated .docx content.
+    :return: None
     """
     alignment = ALIGN_MAP.get(settings.get("alignment", "left"), WD_ALIGN_PARAGRAPH.LEFT)
     line_spacing = float(settings.get("line_spacing", 1.15))
@@ -234,7 +304,7 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
     page_numbers = settings.get("page_numbers", True)
     title = settings.get("title", "").strip()
 
-    # Przygotowanie danych arkuszy
+    # Prepare and validate sheet data
     prepared = {}
     for name, payload in sheets.items():
         df = payload.get("dataframe")
@@ -251,14 +321,14 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
     if not prepared:
         return
 
-    # Konfiguracja dokumentu
+    # Build the document
     doc = Document()
 
     if title:
         heading = doc.add_heading(title, level=0)
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Generowanie tabel dla kazdego arkusza - kazdy na osobnej stronie
+    # Each sheet gets its own section (new page)
     for idx, (sheet_name, data) in enumerate(prepared.items()):
         n_cols = data["df"].shape[1]
         font_scale = _get_font_scale(n_cols)

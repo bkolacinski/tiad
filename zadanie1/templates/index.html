@@ -213,13 +213,16 @@
         {% endif %}
     {% endwith %}
 
+    <!-- Conversion form: posts to /convert with multipart encoding for file upload -->
     <form method="post" action="/convert" enctype="multipart/form-data">
 
+        <!-- Input file section -->
         <div class="section">
             <div class="section-title">Plik wejsciowy</div>
             <input type="file" name="file" accept=".xlsx" required>
         </div>
 
+        <!-- Output format and optional document title -->
         <div class="section">
             <div class="section-title">Format wyjsciowy</div>
             <div class="fmt-row">
@@ -234,6 +237,7 @@
             </div>
         </div>
 
+        <!-- Page layout settings: alignment, line spacing, paragraph spacing, page numbers -->
         <div class="section">
             <div class="section-title">Ustawienia strony</div>
             <div class="two-col">
@@ -267,6 +271,7 @@
             </div>
         </div>
 
+        <!-- Action buttons: convert and download, or save settings without converting -->
         <div class="actions">
             <button type="submit" class="btn-main">Konwertuj i pobierz</button>
             <button type="submit" name="save_settings" value="1" class="btn-sec">Zapisz ustawienia</button>
