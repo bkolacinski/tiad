@@ -87,11 +87,14 @@ class RecipeMatcher:
                 if len(word) > 2:
                     self.ingredient_vocab.add(word)
 
+        # Use char n-grams alongside words - handles Polish morphology
+        # e.g. "kurczak" matches "kurczaka", "kurczakiem", "kurczakowi"
         self.vectorizer = TfidfVectorizer(
-            analyzer="word",
-            ngram_range=(1, 2),  # unigrams + bigrams for "kurczak pieczony" etc.
+            analyzer="char_wb",
+            ngram_range=(3, 5),
             min_df=1,
             sublinear_tf=True,
+            max_features=100000,
         )
         self.tfidf_matrix = self.vectorizer.fit_transform(corpus)
 
@@ -150,9 +153,12 @@ class RecipeMatcher:
         """Check if ingredient appears in recipe text (exact or fuzzy)."""
         if ingredient in recipe_text:
             return True
-        # Fuzzy match for morphological variants
+        # Check if ingredient is a substring of any word (handles "kurczak" in "kurczaka")
+        if any(ingredient in word for word in recipe_text.split()):
+            return True
+        # Fuzzy match - lower threshold to handle morphological variants and typos
         words = recipe_text.split()
-        match = process.extractOne(ingredient, words, scorer=fuzz.ratio, score_cutoff=82)
+        match = process.extractOne(ingredient, words, scorer=fuzz.partial_ratio, score_cutoff=75)
         return match is not None
 
     def _similarity_score(self, ingredients: List[str], recipe_text: str) -> float:

@@ -67,7 +67,7 @@ class App(ctk.CTk):
         self.current_ingredients: list = []
         self.current_results: list = []
         self.current_language: str = "pl"
-        self.search_mode = ctk.StringVar(value="all")
+        self.search_mode = ctk.StringVar(value="any")
 
         self._build_ui()
         self._start_loading()
