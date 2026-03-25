@@ -544,10 +544,15 @@ class App(ctk.CTk):
             self._add_card(i, recipe)
 
     def _add_card(self, idx, recipe):
-        score = recipe.get("_score", 0)
-        score_pct = int(score * 100)
         ings = recipe.get("ingredients", [])
         ing_count = len(ings) if isinstance(ings, list) else 0
+        idx = recipe.get("_idx", -1)
+        lem_text = self.matcher.lemmatized_text(idx)
+        matched_count = sum(
+            1 for i in self.current_ingredients
+            if self.matcher._ingredient_in_text(i, lem_text)
+        ) if self.current_ingredients else 0
+        total_asked = len(self.current_ingredients)
 
         card = ctk.CTkFrame(self.results_scroll, fg_color=CARD,
                              corner_radius=12, border_width=1, border_color=BORDER)
@@ -571,10 +576,15 @@ class App(ctk.CTk):
             text_color=TEXT, anchor="w"
         ).grid(row=0, column=0, sticky="w")
 
-        score_color = SUCCESS if score_pct > 55 else (WARN if score_pct > 25 else MUTED)
+        if total_asked > 0:
+            score_text = f"{matched_count}/{total_asked}"
+            score_color = SUCCESS if matched_count == total_asked else (WARN if matched_count > 0 else MUTED)
+        else:
+            score_text = ""
+            score_color = MUTED
         ctk.CTkLabel(
             title_row,
-            text=f"{score_pct}%",
+            text=score_text,
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=score_color
         ).grid(row=0, column=1, sticky="e", padx=(8, 0))
