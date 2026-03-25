@@ -82,13 +82,15 @@ class RecipeMatcher:
         """
         try:
             import spacy
-            nlp = spacy.load("pl_core_news_sm", disable=["ner", "parser", "senter"])
+            # Load only what's needed; avoid disabling components that may not exist
+            nlp = spacy.load("pl_core_news_sm")
             result = []
             for doc in nlp.pipe(texts, batch_size=256):
                 lemmas = " ".join(t.lemma_.lower() for t in doc if not t.is_space)
                 result.append(lemmas)
             return result
-        except Exception:
+        except Exception as e:
+            print(f"[lemmatize] spaCy error: {e} — using raw text")
             return texts
 
     def _build_index(self):
@@ -149,7 +151,7 @@ class RecipeMatcher:
             lem_text = self._lemmatized[idx] if idx < len(self._lemmatized) else ""
             if all(self._ingredient_in_text(ing, lem_text) for ing in ingredients):
                 score = self._similarity_score(ingredients, lem_text)
-                results.append({**recipe, "_score": score})
+                results.append({**recipe, "_score": score, "_idx": idx})
 
         results.sort(key=lambda r: r["_score"], reverse=True)
         return results[:top_n]
@@ -164,8 +166,14 @@ class RecipeMatcher:
         results = []
         for idx in top_indices:
             if scores[idx] > 0:
-                results.append({**self.recipes[idx], "_score": float(scores[idx])})
+                results.append({**self.recipes[idx], "_score": float(scores[idx]), "_idx": int(idx)})
         return results
+
+    def lemmatized_text(self, recipe_idx: int) -> str:
+        """Return lemmatized ingredient text for a recipe by index."""
+        if 0 <= recipe_idx < len(self._lemmatized):
+            return self._lemmatized[recipe_idx]
+        return ""
 
     def _ingredient_in_text(self, ingredient: str, recipe_text: str) -> bool:
         """

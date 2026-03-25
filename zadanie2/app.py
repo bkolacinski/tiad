@@ -612,8 +612,10 @@ class App(ctk.CTk):
             widget.bind("<Button-1>", on_click)
 
     def _show_detail(self, recipe):
+        idx = recipe.get("_idx", -1)
+        lem_text = self.matcher.lemmatized_text(idx)
         matched = [i for i in self.current_ingredients
-                   if i.lower() in " ".join(str(x) for x in recipe.get("ingredients", [])).lower()]
+                   if self.matcher._ingredient_in_text(i, lem_text)]
         w = DetailWindow(self, recipe, matched)
         w.focus()
 
