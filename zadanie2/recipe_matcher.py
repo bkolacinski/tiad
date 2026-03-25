@@ -73,47 +73,23 @@ class RecipeMatcher:
             self._loaded = True
             return len(self.recipes)
 
-    def _lemmatize_corpus(self, texts: List[str]) -> List[str]:
-        """
-        Lemmatize ingredient strings using spaCy.
-        "2 szklanki mąki" -> "2 szklanka mąka"
-        "dwie marchewki" -> "dwa marchewka"
-        Falls back to original text if spaCy unavailable.
-        """
-        try:
-            import spacy
-            # Load only what's needed; avoid disabling components that may not exist
-            nlp = spacy.load("pl_core_news_sm")
-            result = []
-            for doc in nlp.pipe(texts, batch_size=256):
-                lemmas = " ".join(t.lemma_.lower() for t in doc if not t.is_space)
-                result.append(lemmas)
-            return result
-        except Exception as e:
-            print(f"[lemmatize] spaCy error: {e} — using raw text")
-            return texts
-
     def _build_index(self):
-        """Build TF-IDF index from lemmatized recipe ingredients."""
-        raw_corpus = []
+        """Build TF-IDF index from recipe ingredients."""
+        corpus = []
         for recipe in self.recipes:
             ingredients = recipe.get("ingredients", [])
             if isinstance(ingredients, list):
                 text = " ".join(str(i).lower() for i in ingredients)
             else:
                 text = str(ingredients).lower()
-            raw_corpus.append(text)
-
-        # Lemmatize: "marchewki" -> "marchewka", "wody" -> "woda"
-        self._lemmatized = self._lemmatize_corpus(raw_corpus)
-
-        # Collect vocabulary from lemmatized text
-        for text in self._lemmatized:
+            self._lemmatized.append(text)
+            corpus.append(text)
             for word in text.split():
                 if len(word) > 2:
                     self.ingredient_vocab.add(word)
 
-        # char n-grams on lemmatized text - robust to remaining morphology
+        # char n-grams handle Polish morphology without any model
+        # "woda" shares "wod","oda" with "wody"; "marchewka" shares "marchew" with "marchewki"
         self.vectorizer = TfidfVectorizer(
             analyzer="char_wb",
             ngram_range=(3, 5),
@@ -121,7 +97,7 @@ class RecipeMatcher:
             sublinear_tf=True,
             max_features=100000,
         )
-        self.tfidf_matrix = self.vectorizer.fit_transform(self._lemmatized)
+        self.tfidf_matrix = self.vectorizer.fit_transform(corpus)
 
     def search(
         self,
@@ -177,18 +153,36 @@ class RecipeMatcher:
 
     def _ingredient_in_text(self, ingredient: str, recipe_text: str) -> bool:
         """
-        Check if ingredient (already lemmatized) appears in lemmatized recipe text.
-        Handles: exact match, substring (kurczak in kurczaka), fuzzy.
+        Check if ingredient appears in recipe text.
+        Uses prefix matching to handle Polish inflection without any NLP model:
+          "woda"     matches "wody"     (shared prefix "wod")
+          "marchewka" matches "marchewki" (shared prefix "marchew")
+          "kurczak"  matches "kurczaka" (substring)
         """
+        if not ingredient or len(ingredient) < 2:
+            return False
         if ingredient in recipe_text:
             return True
-        words = recipe_text.split()
-        # Substring: "kurczak" matches "kurczaka", "marchewk" matches "marchewka"
-        if any(ingredient in word or word in ingredient for word in words if len(word) > 2):
-            return True
-        # Fuzzy: catches remaining morphological variants and slight typos
-        match = process.extractOne(ingredient, words, scorer=fuzz.partial_ratio, score_cutoff=72)
-        return match is not None
+
+        n = len(ingredient)
+        # prefix length: strip last 2 chars as potential inflection suffix
+        stem_len = max(3, n - 2)
+        ing_stem = ingredient[:stem_len]
+
+        for word in recipe_text.split():
+            if len(word) < 2:
+                continue
+            # substring check
+            if ingredient in word or word in ingredient:
+                return True
+            # prefix / stem check - handles most Polish noun inflections
+            if len(word) >= stem_len and word[:stem_len] == ing_stem:
+                return True
+            # fuzzy fallback for typos or irregular forms
+            if len(word) >= 3 and fuzz.ratio(ingredient, word) >= 72:
+                return True
+
+        return False
 
     def _similarity_score(self, ingredients: List[str], recipe_text: str) -> float:
         """Fraction of queried ingredients found in recipe."""
