@@ -28,11 +28,27 @@ def main():
     print("  Recipe Voice Filter - Setup")
     print("=" * 55)
 
-    # 1. Install Python packages
+    # 0. Upgrade pip + setuptools (fixes pkg_resources missing on old miniconda)
     run(
+        f"{sys.executable} -m pip install --upgrade pip setuptools wheel",
+        "Aktualizowanie pip i setuptools..."
+    )
+
+    # 1. Install Python packages
+    ok = run(
         f"{sys.executable} -m pip install -r requirements.txt",
         "Instalowanie pakietow Python..."
     )
+    if not ok:
+        # Fallback: install one by one skipping failures
+        print("  Probuje instalowac pakiety pojedynczo...")
+        packages = [
+            "openai-whisper", "customtkinter", "sounddevice", "soundfile",
+            "numpy", "scipy", "scikit-learn", "rapidfuzz", "spacy",
+            "argostranslate", "Pillow",
+        ]
+        for pkg in packages:
+            run(f"{sys.executable} -m pip install {pkg}", f"  Instalowanie {pkg}...")
 
     # 2. Download spaCy Polish model
     run(
