@@ -1,3 +1,6 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 """
 Recipe Voice Filter - Main Application
 Zadanie 2: Filtrowanie przepisów na podstawie mowy
