@@ -107,69 +107,74 @@ def parse_recipe(url, content):
 
     recipe["ingredients"] = [clean_html(i) for i in ingredients if clean_html(i)]
 
-    # Instructions: find the article-content-body div (has itemprop=recipeInstructions)
-    # Extract all paragraphs from the main content section after ingredients
+    # Instructions: extract paragraphs from article-content-body,
+    # keeping only those that contain actual cooking steps.
+    # aniagotuje.pl uses flowing prose (not numbered steps), so we
+    # filter by Polish cooking imperative verbs and skip blog/SEO filler.
+
+    COOKING_VERBS = re.compile(
+        r'\b(dodaj|smaż|gotuj|wymieszaj|pokrój|zagotuj|wlej|wsyp|odcedź|'
+        r'podgrzej|upiecz|nałóż|posyp|przykryj|wyjmij|odstaw|odczekaj|'
+        r'rozgrzej|obtocz|marynuj|blenduj|zetrzyj|wyciśnij|obierz|umyj|'
+        r'osusz|dopraw|przypraw|ugotuj|podsmaż|podduś|zacznij|przełóż|'
+        r'wyłóż|ułóż|zanurz|odlej|wyłącz|zmniejsz|zwiększ|sprawdź|'
+        r'siekaj|posiekaj|zblenduj|utłucz|roztop|rozbij|ubij|ugniataj|'
+        r'wyrób|podziel|pokrusz|zetrzyj|zamarynuj|zalewaj|namocz|'
+        r'nakładaj|porcjuj|kroić|smażyć|gotować|piec|dusić)\b',
+        re.IGNORECASE
+    )
+
+    SKIP_PATTERNS = [
+        r'^Czas przygotowania',
+        r'^Czas gotowania',
+        r'^Czas pieczenia',
+        r'^Czas smażenia',
+        r'^Czas duszenia',
+        r'^Liczba porcji',
+        r'^W 100 g',
+        r'^Wartość energetyczna',
+        r'^Węglowodany',
+        r'^Białko',
+        r'^Tłuszcze',
+        r'^Dieta:',
+        r'Polecam też',
+        r'Polecam wypróbuj',
+        r'Sprawdź też',
+        r'Zapraszam też',
+        r'zapraszam po przepis',
+        r'przepisy znajdziesz',
+        r'^Smacznego',
+    ]
+
+    FILLER_PHRASES = re.compile(
+        r'(Uwielbiam szyko|Jak podkreślałam|satysfakcj[ęą] z tworzenia|'
+        r'w restauracji kosztowałoby|znakomitym sposobem na|kuchnia to przestrzeń|'
+        r'Niech ten przepis będzie|Pamiętaj, że kuchnia|Gotowanie w grupie|'
+        r'cieszenie się świeżymi|sztucznych dodatków)',
+        re.IGNORECASE
+    )
+
     instructions_parts = []
 
-    # Find the recipeInstructions section
-    inst_start = content.find('itemprop="recipeInstructions"')
-    if inst_start < 0:
-        inst_start = content.find('recipeInstructions"')
+    m = re.search(r'class="article-content-body"[^>]*>(.*?)(?=class="col-12 related-posts"|class="seo-box")', content, re.DOTALL)
+    if m:
+        body = m.group(1)
+        paras = re.findall(r'<p[^>]*>(.*?)</p>', body, re.DOTALL)
 
-    if inst_start >= 0:
-        # Find the first H2 or H3 that marks beginning of actual steps
-        # These are the actual recipe instructions (skip intro and metadata)
-        inst_section = content[inst_start:inst_start + 50000]
-
-        # Find all <h2> and <h3> headings to identify start of steps
-        h_matches = list(re.finditer(r'<h[23][^>]*>(.*?)</h[23]>', inst_section, re.DOTALL))
-
-        if h_matches:
-            # Start from first heading that seems like a recipe title/step
-            first_h = h_matches[0].start()
-            cooking_section = inst_section[first_h:]
-        else:
-            cooking_section = inst_section
-
-        # Extract all meaningful paragraphs
-        paras = re.findall(r'<p[^>]*>(.*?)</p>', cooking_section, re.DOTALL)
         for p in paras:
-            clean = clean_html(p)
-            # Skip very short or metadata paragraphs
-            if len(clean) > 30:
-                # Skip if it's just ingredient list or meta info
-                skip_patterns = [
-                    r'^Czas przygotowania:',
-                    r'^Kalorie ',
-                    r'^W 100 g:',
-                    r'^\d+ kcal',
-                    r'^Węglowodany',
-                    r'^Białko',
-                    r'^Tłuszcze',
-                    r'^Dieta:',
-                ]
-                should_skip = any(re.match(pat, clean) for pat in skip_patterns)
-                if not should_skip:
-                    instructions_parts.append(clean)
+            text = clean_html(p)
+            if len(text) < 60:
+                continue
+            if any(re.search(pat, text, re.IGNORECASE) for pat in SKIP_PATTERNS):
+                continue
+            if FILLER_PHRASES.search(text):
+                continue
+            # Keep if it has cooking verbs OR is a long paragraph (>200 chars) describing preparation
+            if COOKING_VERBS.search(text) or (len(text) > 200 and re.search(r'\b(sos|mięso|warzywa|składnik|masa|ciasto|farsz|nadzienie)\b', text, re.IGNORECASE)):
+                instructions_parts.append(text)
 
-        # Also get h2/h3 headings as section headers in instructions
-        # but exclude navigation and breadcrumb headings
-        # Combine everything
-        if instructions_parts:
-            recipe["instructions"] = "\n\n".join(instructions_parts)
-
-    # If instructions still empty, try alternative extraction
-    if not recipe["instructions"]:
-        # Just get all paragraphs in the article
-        article_m = re.search(r'<article[^>]*>(.*?)</article>', content, re.DOTALL)
-        if article_m:
-            paras = re.findall(r'<p[^>]*>(.*?)</p>', article_m.group(1), re.DOTALL)
-            parts = []
-            for p in paras:
-                clean = clean_html(p)
-                if len(clean) > 50:
-                    parts.append(clean)
-            recipe["instructions"] = "\n\n".join(parts[:20])
+    if instructions_parts:
+        recipe["instructions"] = "\n\n".join(instructions_parts)
 
     return recipe
 
