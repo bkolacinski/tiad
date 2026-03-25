@@ -32,6 +32,7 @@ class RecipeMatcher:
         self.vectorizer: TfidfVectorizer = None
         self.tfidf_matrix = None
         self.ingredient_vocab: Set[str] = set()
+        self._lemmatized: List[str] = []   # lemmatized ingredient text per recipe
         self._lock = threading.Lock()
         self._loaded = False
 
@@ -72,23 +73,45 @@ class RecipeMatcher:
             self._loaded = True
             return len(self.recipes)
 
+    def _lemmatize_corpus(self, texts: List[str]) -> List[str]:
+        """
+        Lemmatize ingredient strings using spaCy.
+        "2 szklanki mąki" -> "2 szklanka mąka"
+        "dwie marchewki" -> "dwa marchewka"
+        Falls back to original text if spaCy unavailable.
+        """
+        try:
+            import spacy
+            nlp = spacy.load("pl_core_news_sm", disable=["ner", "parser", "senter"])
+            result = []
+            for doc in nlp.pipe(texts, batch_size=256):
+                lemmas = " ".join(t.lemma_.lower() for t in doc if not t.is_space)
+                result.append(lemmas)
+            return result
+        except Exception:
+            return texts
+
     def _build_index(self):
-        """Build TF-IDF index from recipe ingredients."""
-        corpus = []
+        """Build TF-IDF index from lemmatized recipe ingredients."""
+        raw_corpus = []
         for recipe in self.recipes:
             ingredients = recipe.get("ingredients", [])
             if isinstance(ingredients, list):
                 text = " ".join(str(i).lower() for i in ingredients)
             else:
                 text = str(ingredients).lower()
-            corpus.append(text)
-            # Collect vocabulary
+            raw_corpus.append(text)
+
+        # Lemmatize: "marchewki" -> "marchewka", "wody" -> "woda"
+        self._lemmatized = self._lemmatize_corpus(raw_corpus)
+
+        # Collect vocabulary from lemmatized text
+        for text in self._lemmatized:
             for word in text.split():
                 if len(word) > 2:
                     self.ingredient_vocab.add(word)
 
-        # Use char n-grams alongside words - handles Polish morphology
-        # e.g. "kurczak" matches "kurczaka", "kurczakiem", "kurczakowi"
+        # char n-grams on lemmatized text - robust to remaining morphology
         self.vectorizer = TfidfVectorizer(
             analyzer="char_wb",
             ngram_range=(3, 5),
@@ -96,7 +119,7 @@ class RecipeMatcher:
             sublinear_tf=True,
             max_features=100000,
         )
-        self.tfidf_matrix = self.vectorizer.fit_transform(corpus)
+        self.tfidf_matrix = self.vectorizer.fit_transform(self._lemmatized)
 
     def search(
         self,
@@ -120,17 +143,12 @@ class RecipeMatcher:
         return self._rank_by_similarity(ingredients, top_n)
 
     def _filter_all(self, ingredients: List[str], top_n: int) -> List[Dict]:
-        """Return recipes that contain ALL queried ingredients."""
+        """Return recipes that contain ALL queried ingredients (using lemmatized text)."""
         results = []
-        for recipe in self.recipes:
-            recipe_ingredients_raw = recipe.get("ingredients", [])
-            if isinstance(recipe_ingredients_raw, list):
-                recipe_text = " ".join(str(i).lower() for i in recipe_ingredients_raw)
-            else:
-                recipe_text = str(recipe_ingredients_raw).lower()
-
-            if all(self._ingredient_in_text(ing, recipe_text) for ing in ingredients):
-                score = self._similarity_score(ingredients, recipe_text)
+        for idx, recipe in enumerate(self.recipes):
+            lem_text = self._lemmatized[idx] if idx < len(self._lemmatized) else ""
+            if all(self._ingredient_in_text(ing, lem_text) for ing in ingredients):
+                score = self._similarity_score(ingredients, lem_text)
                 results.append({**recipe, "_score": score})
 
         results.sort(key=lambda r: r["_score"], reverse=True)
@@ -150,19 +168,22 @@ class RecipeMatcher:
         return results
 
     def _ingredient_in_text(self, ingredient: str, recipe_text: str) -> bool:
-        """Check if ingredient appears in recipe text (exact or fuzzy)."""
+        """
+        Check if ingredient (already lemmatized) appears in lemmatized recipe text.
+        Handles: exact match, substring (kurczak in kurczaka), fuzzy.
+        """
         if ingredient in recipe_text:
             return True
-        # Check if ingredient is a substring of any word (handles "kurczak" in "kurczaka")
-        if any(ingredient in word for word in recipe_text.split()):
-            return True
-        # Fuzzy match - lower threshold to handle morphological variants and typos
         words = recipe_text.split()
-        match = process.extractOne(ingredient, words, scorer=fuzz.partial_ratio, score_cutoff=75)
+        # Substring: "kurczak" matches "kurczaka", "marchewk" matches "marchewka"
+        if any(ingredient in word or word in ingredient for word in words if len(word) > 2):
+            return True
+        # Fuzzy: catches remaining morphological variants and slight typos
+        match = process.extractOne(ingredient, words, scorer=fuzz.partial_ratio, score_cutoff=72)
         return match is not None
 
     def _similarity_score(self, ingredients: List[str], recipe_text: str) -> float:
-        """Simple overlap score for secondary ranking."""
+        """Fraction of queried ingredients found in recipe."""
         count = sum(1 for ing in ingredients if self._ingredient_in_text(ing, recipe_text))
         return count / max(len(ingredients), 1)
 

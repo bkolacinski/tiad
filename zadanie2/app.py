@@ -21,7 +21,7 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 from stt import AudioRecorder, load_model, transcribe
 from ingredient_extractor import extract_ingredients
 from recipe_matcher import RecipeMatcher
-from translator import translate_text
+from translator import translate_text, install_language_pair, TranslationUnavailable
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -345,13 +345,14 @@ class App(ctk.CTk):
         )
         self.combo_translate.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
 
-        ctk.CTkButton(
+        self.btn_translate = ctk.CTkButton(
             tr_block, text="Tłumacz",
             font=ctk.CTkFont(size=12), height=32,
             corner_radius=8,
             fg_color=ACCENT, hover_color="#6254d4",
             command=self._translate,
-        ).grid(row=1, column=1, padx=(4, 14), pady=(0, 10))
+        )
+        self.btn_translate.grid(row=1, column=1, padx=(4, 14), pady=(0, 10))
 
         self.lbl_translation = ctk.CTkLabel(
             tr_block, text="",
@@ -359,7 +360,19 @@ class App(ctk.CTk):
             wraplength=290, justify="left"
         )
         self.lbl_translation.grid(row=2, column=0, columnspan=2,
-                                   padx=14, pady=(0, 12), sticky="w")
+                                   padx=14, pady=(0, 4), sticky="w")
+
+        self.btn_install_pkg = ctk.CTkButton(
+            tr_block, text="⬇ Pobierz pakiety tłumaczeń",
+            font=ctk.CTkFont(size=11), height=28,
+            corner_radius=8,
+            fg_color=CARD_H, hover_color=CARD,
+            text_color=MUTED,
+            command=self._install_translation_packages,
+        )
+        self.btn_install_pkg.grid(row=3, column=0, columnspan=2,
+                                   padx=14, pady=(0, 12), sticky="ew")
+        self.btn_install_pkg.grid_remove()  # hidden by default
 
     def _build_main(self):
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
@@ -613,12 +626,50 @@ class App(ctk.CTk):
         lang_map = {"angielski": "en", "niemiecki": "de", "francuski": "fr", "hiszpański": "es"}
         target = lang_map.get(self.combo_translate.get(), "en")
         self.lbl_translation.configure(text="Tłumaczę...", text_color=WARN)
+        self.btn_install_pkg.grid_remove()
 
         def do():
-            result = translate_text(text, self.current_language, target)
-            msg = result if result else "⚠ Pakiet tłumaczeń niedostępny"
-            color = TEXT if result else WARN
-            self.after(0, lambda: self.lbl_translation.configure(text=msg, text_color=color))
+            try:
+                result = translate_text(text, self.current_language, target)
+                self.after(0, lambda: self.lbl_translation.configure(
+                    text=result, text_color=TEXT))
+            except TranslationUnavailable:
+                self.after(0, lambda: self.lbl_translation.configure(
+                    text="⚠ Pakiety tłumaczeń nie są zainstalowane.",
+                    text_color=WARN))
+                self.after(0, self.btn_install_pkg.grid)
+            except Exception as e:
+                self.after(0, lambda: self.lbl_translation.configure(
+                    text=f"Błąd: {e}", text_color=REC))
+
+        threading.Thread(target=do, daemon=True).start()
+
+    def _install_translation_packages(self):
+        self.btn_install_pkg.configure(text="Pobieranie... (wymaga internetu)", state="disabled")
+        self.lbl_translation.configure(text="Pobieranie pakietów tłumaczeń...", text_color=WARN)
+
+        def do():
+            pairs = [("pl", "en"), ("en", "pl"), ("pl", "de"), ("de", "pl")]
+            ok = 0
+            for src, tgt in pairs:
+                success = install_language_pair(
+                    src, tgt,
+                    progress_callback=lambda m: self.after(0, lambda msg=m:
+                        self.lbl_translation.configure(text=msg, text_color=WARN))
+                )
+                if success:
+                    ok += 1
+            if ok > 0:
+                self.after(0, lambda: self.lbl_translation.configure(
+                    text=f"✓ Zainstalowano {ok} pakietów. Spróbuj tłumaczyć ponownie.",
+                    text_color=SUCCESS))
+                self.after(0, self.btn_install_pkg.grid_remove)
+            else:
+                self.after(0, lambda: self.lbl_translation.configure(
+                    text="⚠ Nie udało się pobrać pakietów. Sprawdź połączenie z internetem.",
+                    text_color=REC))
+            self.after(0, lambda: self.btn_install_pkg.configure(
+                text="⬇ Pobierz pakiety tłumaczeń", state="normal"))
 
         threading.Thread(target=do, daemon=True).start()
 

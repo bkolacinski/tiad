@@ -45,21 +45,32 @@ def get_available_targets(source_lang: str) -> List[Tuple[str, str]]:
 
 
 def translate_text(text: str, source: str, target: str) -> Optional[str]:
-    """Translate text offline. Returns None if translation unavailable."""
+    """
+    Translate text offline.
+    Returns translated string, or raises TranslationUnavailable if packages missing.
+    """
     try:
         from argostranslate import translate as argtrans
         installed = argtrans.get_installed_languages()
         src_lang = next((l for l in installed if l.code == source), None)
         if not src_lang:
-            return None
-        translation = src_lang.get_translation(
-            next((l for l in installed if l.code == target), None)
-        )
+            raise TranslationUnavailable(source, target)
+        tgt_lang = next((l for l in installed if l.code == target), None)
+        translation = src_lang.get_translation(tgt_lang) if tgt_lang else None
         if not translation:
-            return None
+            raise TranslationUnavailable(source, target)
         return translation.translate(text)
-    except Exception:
-        return None
+    except TranslationUnavailable:
+        raise
+    except Exception as e:
+        raise TranslationUnavailable(source, target) from e
+
+
+class TranslationUnavailable(Exception):
+    def __init__(self, source: str, target: str):
+        self.source = source
+        self.target = target
+        super().__init__(f"Brak pakietu tłumaczeń {source}→{target}")
 
 
 def install_language_pair(source: str, target: str, progress_callback=None) -> bool:
