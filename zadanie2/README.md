@@ -1,15 +1,16 @@
 # Recipe Voice Filter
 
-Aplikacja do filtrowania przepisów na podstawie mowy. Działa **w pełni offline**.
+Aplikacja do filtrowania przepisów kulinarnych na podstawie mowy. Działa **w pełni offline**.
 
 ## Wymagania
+
 - Python 3.10+ (Windows)
 - ~1.5 GB wolnego miejsca (modele AI)
 
 ## Pierwsze uruchomienie
 
 ```bat
-# 1. Zainstaluj wszystko + pobierz modele
+# 1. Zainstaluj zależności i pobierz modele
 python setup.py
 
 # 2. (Opcjonalnie) Zescrapuj więcej przepisów
@@ -29,17 +30,20 @@ Gotowy plik: `dist\RecipeVoiceFilter\RecipeVoiceFilter.exe`
 
 ## Jak używać
 
-1. Kliknij **Nagraj** i powiedz np. *"kurczak, ziemniaki, czosnek"*
+1. Kliknij **Nagraj** i wymów składniki, np. *"kurczak, ziemniaki, czosnek"*
 2. Kliknij **Zatrzymaj**
 3. Aplikacja transkrybuje mowę, wykrywa składniki i wyświetla pasujące przepisy
-4. Kliknij przepis aby zobaczyć szczegóły
+4. Kliknij przepis, aby zobaczyć szczegóły i listę składników
+5. (Opcjonalnie) Kliknij **Tłumacz**, aby przetłumaczyć transkrypcję na angielski
 
-Możesz też wczytać plik audio (wav, mp3, ogg).
+Możesz też wczytać plik audio (wav, mp3, ogg) przyciskiem **Wczytaj plik audio**.
 
 ## Tryby wyszukiwania
 
-- **Wszystkie** – tylko przepisy zawierające WSZYSTKIE wymienione składniki
-- **Ranking** – przepisy posortowane wg podobieństwa (TF-IDF cosine similarity)
+| Tryb | Opis |
+|------|------|
+| **Najlepsze** | Przepisy posortowane wg trafności (TF-IDF cosine similarity) |
+| **Wszystkie** | Tylko przepisy zawierające **wszystkie** wymienione składniki |
 
 ## Technologie (w pełni offline)
 
@@ -49,7 +53,7 @@ Możesz też wczytać plik audio (wav, mp3, ogg).
 | STT | OpenAI Whisper `small` |
 | Detekcja języka | Wbudowana w Whisper |
 | NLP / lemmatyzacja | spaCy `pl_core_news_sm` |
-| Dopasowanie przepisów | TF-IDF + cosine similarity (scikit-learn) |
 | Fuzzy matching | rapidfuzz |
+| Dopasowanie przepisów | TF-IDF + cosine similarity (scikit-learn) |
 | Tłumaczenie | argostranslate (offline) |
 | Pakowanie | PyInstaller |
