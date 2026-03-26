@@ -12,12 +12,43 @@ _nlp_lock = threading.Lock()
 
 # Common Polish stop-words and non-ingredient words to filter out
 NON_INGREDIENTS = {
-    "składnik", "przepis", "danie", "potrawa", "jedzenie", "gotowanie",
-    "chcę", "chciałbym", "chciałabym", "potrzebuję", "mam", "lubię",
-    "zrobić", "ugotować", "przygotować", "lista", "coś", "czegoś",
-    "dodać", "użyć", "zawierać", "potrzeba", "proszę", "szukam",
-    "przepisy", "składniki", "pokazać", "znaleźć", "jak", "to", "się",
-    "który", "która", "które", "tego", "tej", "temu",
+    "składnik",
+    "przepis",
+    "danie",
+    "potrawa",
+    "jedzenie",
+    "gotowanie",
+    "chcę",
+    "chciałbym",
+    "chciałabym",
+    "potrzebuję",
+    "mam",
+    "lubię",
+    "zrobić",
+    "ugotować",
+    "przygotować",
+    "lista",
+    "coś",
+    "czegoś",
+    "dodać",
+    "użyć",
+    "zawierać",
+    "potrzeba",
+    "proszę",
+    "szukam",
+    "przepisy",
+    "składniki",
+    "pokazać",
+    "znaleźć",
+    "jak",
+    "to",
+    "się",
+    "który",
+    "która",
+    "które",
+    "tego",
+    "tej",
+    "temu",
 }
 
 
@@ -27,6 +58,7 @@ def _load_nlp():
         if _nlp is None:
             try:
                 import spacy
+
                 _nlp = spacy.load("pl_core_news_sm")
             except OSError:
                 # Model not downloaded - fall back to regex-based extraction
@@ -53,14 +85,46 @@ def extract_ingredients(text: str, known_vocab: Set[str] = None) -> List[str]:
 
 def _extract_with_spacy(text: str, nlp, known_vocab: Set[str]) -> List[str]:
     """Use spaCy for lemmatization and noun extraction."""
+    from rapidfuzz import process, fuzz
+
     doc = nlp(text)
     candidates = []
 
     for token in doc:
-        # Take nouns and proper nouns
-        if token.pos_ in ("NOUN", "PROPN") and not token.is_stop:
-            lemma = token.lemma_.lower()
-            if lemma not in NON_INGREDIENTS and len(lemma) > 2:
+        lemma = token.lemma_.lower()
+        original = token.text.lower()
+        if len(lemma) <= 2 or lemma in NON_INGREDIENTS or token.is_stop:
+            continue
+
+        is_noun = token.pos_ in ("NOUN", "PROPN")
+
+        # Exact match in known vocab (lemma or original form)
+        in_vocab_exact = known_vocab and (
+            lemma in known_vocab or original in known_vocab
+        )
+
+        # Fuzzy match for tokens not recognized as nouns (e.g. foreign words tagged X)
+        # — catches "ketchup", brand names, transliterations, inflection mismatches
+        if not is_noun and not in_vocab_exact and known_vocab:
+            best = process.extractOne(
+                lemma, known_vocab, scorer=fuzz.ratio, score_cutoff=80
+            )
+            if best:
+                candidates.append(best[0])
+                continue
+            best = process.extractOne(
+                original, known_vocab, scorer=fuzz.ratio, score_cutoff=80
+            )
+            if best:
+                candidates.append(best[0])
+                continue
+
+        if is_noun or in_vocab_exact:
+            # Prefer the form that actually exists in known_vocab to avoid
+            # wrong lemmatization (e.g. spaCy sm model: "cebula" → "cebuly")
+            if known_vocab and original in known_vocab:
+                candidates.append(original)
+            else:
                 candidates.append(lemma)
 
     return _deduplicate(candidates, known_vocab)
@@ -72,6 +136,7 @@ def _extract_fallback(text: str, known_vocab: Set[str]) -> List[str]:
     if known_vocab:
         # Match against known ingredient vocabulary with fuzzy fallback
         from rapidfuzz import process, fuzz
+
         found = []
         for word in words:
             if len(word) <= 2:
@@ -80,9 +145,7 @@ def _extract_fallback(text: str, known_vocab: Set[str]) -> List[str]:
                 found.append(word)
                 continue
             match = process.extractOne(
-                word, known_vocab,
-                scorer=fuzz.ratio,
-                score_cutoff=80
+                word, known_vocab, scorer=fuzz.ratio, score_cutoff=80
             )
             if match:
                 found.append(match[0])

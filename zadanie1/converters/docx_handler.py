@@ -74,7 +74,9 @@ def _normalize_widths(excel_widths: list, n_cols: int) -> list[float]:
     return widths
 
 
-def _scale_widths_to_twips(excel_widths: list[float], available_twips: int) -> list[int]:
+def _scale_widths_to_twips(
+    excel_widths: list[float], available_twips: int
+) -> list[int]:
     """
     Scales Excel column widths proportionally to fit the available page width.
     :param excel_widths: Column widths in Excel units.
@@ -155,9 +157,14 @@ def _set_cell_width(cell, width_twips: int) -> None:
     tcPr.append(tcW)
 
 
-def _apply_cell_formatting(cell, style: dict, font_scale: float,
-                           line_spacing: float, space_after: int,
-                           default_alignment) -> None:
+def _apply_cell_formatting(
+    cell,
+    style: dict,
+    font_scale: float,
+    line_spacing: float,
+    space_after: int,
+    default_alignment,
+) -> None:
     """
     Applies font, color, and paragraph formatting to a table cell.
     :param cell: The python-docx table cell to format.
@@ -181,7 +188,9 @@ def _apply_cell_formatting(cell, style: dict, font_scale: float,
     scaled_size = max(original_size * font_scale, 6.0)
 
     for para in cell.paragraphs:
-        para.alignment = _get_para_alignment(align_info.get("horizontal"), default_alignment)
+        para.alignment = _get_para_alignment(
+            align_info.get("horizontal"), default_alignment
+        )
         para.paragraph_format.line_spacing = line_spacing
         para.paragraph_format.space_after = Pt(space_after)
 
@@ -236,10 +245,17 @@ def _setup_section(section, n_cols: int) -> int:
     return page_w_twips - margin_twips
 
 
-def _add_sheet_table(doc: Document, df: pd.DataFrame, cells: list,
-                     merges: list, twip_widths: list[int],
-                     font_scale: float, line_spacing: float,
-                     space_after: int, default_alignment) -> None:
+def _add_sheet_table(
+    doc: Document,
+    df: pd.DataFrame,
+    cells: list,
+    merges: list,
+    twip_widths: list[int],
+    font_scale: float,
+    line_spacing: float,
+    space_after: int,
+    default_alignment,
+) -> None:
     """
     Adds a formatted table for a single sheet to the document.
     :param doc: Target python-docx Document object.
@@ -276,13 +292,21 @@ def _add_sheet_table(doc: Document, df: pd.DataFrame, cells: list,
                 continue
 
             cell = table.cell(row_i, col_j)
-            value = meta.get("value") if meta.get("value") is not None else str(df.iat[row_i, col_j])
+            value = (
+                meta.get("value")
+                if meta.get("value") is not None
+                else str(df.iat[row_i, col_j])
+            )
             cell.text = str(value)
 
             _set_cell_width(cell, twip_widths[col_j])
             _apply_cell_formatting(
-                cell, meta.get("style", {}),
-                font_scale, line_spacing, space_after, default_alignment,
+                cell,
+                meta.get("style", {}),
+                font_scale,
+                line_spacing,
+                space_after,
+                default_alignment,
             )
 
     doc.add_paragraph()
@@ -298,7 +322,9 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
     :param output: Writable binary stream (e.g. BytesIO) that receives the generated .docx content.
     :return: None
     """
-    alignment = ALIGN_MAP.get(settings.get("alignment", "left"), WD_ALIGN_PARAGRAPH.LEFT)
+    alignment = ALIGN_MAP.get(
+        settings.get("alignment", "left"), WD_ALIGN_PARAGRAPH.LEFT
+    )
     line_spacing = float(settings.get("line_spacing", 1.15))
     space_after = int(settings.get("space_after", 6))
     page_numbers = settings.get("page_numbers", True)
@@ -313,7 +339,9 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
         df = df.fillna("")
         prepared[name] = {
             "df": df,
-            "widths": _normalize_widths(payload.get("excel_col_widths", []), df.shape[1]),
+            "widths": _normalize_widths(
+                payload.get("excel_col_widths", []), df.shape[1]
+            ),
             "cells": payload.get("cells", []),
             "merges": payload.get("merges", []),
         }
@@ -346,8 +374,15 @@ def df_to_docx(sheets: dict, settings: dict, output) -> None:
 
         twip_widths = _scale_widths_to_twips(data["widths"], available_twips)
         _add_sheet_table(
-            doc, data["df"], data["cells"], data["merges"],
-            twip_widths, font_scale, line_spacing, space_after, alignment,
+            doc,
+            data["df"],
+            data["cells"],
+            data["merges"],
+            twip_widths,
+            font_scale,
+            line_spacing,
+            space_after,
+            alignment,
         )
 
     if page_numbers:

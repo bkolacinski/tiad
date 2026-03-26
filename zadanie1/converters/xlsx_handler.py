@@ -223,7 +223,7 @@ def _build_dataframe(ws, n_rows: int, n_cols: int) -> pd.DataFrame:
 
 
 def _collect_cells_metadata(
-        ws, n_rows: int, n_cols: int, merged_map: dict[tuple[int, int], dict]
+    ws, n_rows: int, n_cols: int, merged_map: dict[tuple[int, int], dict]
 ) -> list[list[dict]]:
     """
     Collects cell metadata from the worksheet.
@@ -280,7 +280,7 @@ def _find_used_range(ws) -> tuple[int, int]:
 
     last_col = 0
     for row in ws.iter_rows(
-            min_row=1, max_row=max_row_raw, min_col=1, max_col=max_col_raw
+        min_row=1, max_row=max_row_raw, min_col=1, max_col=max_col_raw
     ):
         for cell in reversed(row):
             if cell.value is not None:
@@ -289,7 +289,7 @@ def _find_used_range(ws) -> tuple[int, int]:
 
     last_row = 0
     for row in ws.iter_rows(
-            min_row=1, max_row=max_row_raw, min_col=1, max_col=max(last_col, 1)
+        min_row=1, max_row=max_row_raw, min_col=1, max_col=max(last_col, 1)
     ):
         for cell in row:
             if cell.value is not None:

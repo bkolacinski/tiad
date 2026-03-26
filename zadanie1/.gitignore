@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+settings.json
+*.xlsx
+build/
+dist/
+*.spec
