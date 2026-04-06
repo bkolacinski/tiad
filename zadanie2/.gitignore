@@ -7,6 +7,12 @@ models/
 # Data / scraped recipes
 data/
 
+# Offline Argos Translate packages (downloaded by setup.py)
+translation_packages/
+
+# PyInstaller output folder (build.bat → release\RecipeVoiceFilter\)
+release/
+
 # Python cache
 __pycache__/
 *.pyc

@@ -1,67 +1,163 @@
-"""
-Recipe matching engine using TF-IDF + cosine similarity.
-No LLM - pure classical IR/NLP approach.
-"""
+"""Recipe matching engine based on normalized ingredient terms."""
 
+from __future__ import annotations
+
+import glob
 import json
 import os
-import glob
+import pickle
+import re
 import threading
-from typing import List, Dict, Set, Tuple
+from collections import Counter
+from typing import Dict
 
 import numpy as np
+from rapidfuzz import fuzz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from rapidfuzz import fuzz, process
+
+from text_utils import canonical_token, normalize_text, tokenize_words, tokens_match
+
+_NLP = None
+_NLP_LOCK = threading.Lock()
+
+UNIT_WORDS = {
+    "g",
+    "kg",
+    "dag",
+    "ml",
+    "l",
+    "łyżka",
+    "łyżki",
+    "łyżeczka",
+    "łyżeczki",
+    "szklanka",
+    "szklanki",
+    "szczypta",
+    "szczypty",
+    "opakowanie",
+    "opakowania",
+    "puszka",
+    "puszki",
+    "kostka",
+    "kostki",
+    "ząbek",
+    "ząbki",
+    "sztuka",
+    "sztuki",
+    "sztuk",
+    "pęczek",
+    "pęczki",
+}
+
+NOISE_WORDS = {
+    "około",
+    "niecałe",
+    "niecała",
+    "dowolny",
+    "dowolnych",
+    "ulubionej",
+    "ulubionego",
+    "mały",
+    "mała",
+    "małe",
+    "duży",
+    "duża",
+    "duże",
+    "średni",
+    "średnia",
+    "średnie",
+    "świeży",
+    "świeża",
+    "świeże",
+    "mrożony",
+    "mrożona",
+    "mrożone",
+    "drobno",
+    "starty",
+    "starta",
+    "startego",
+    "gotowej",
+    "gotowy",
+    "gotowe",
+    "obrany",
+    "obrana",
+    "obrane",
+    "przyprawy",
+    "można",
+    "pominąć",
+    "lub",
+    "albo",
+    "oraz",
+    "i",
+    "po",
+    "do",
+    "ze",
+    "z",
+    "na",
+    "bez",
+}
+
+
+def _load_nlp():
+    global _NLP
+    with _NLP_LOCK:
+        if _NLP is None:
+            try:
+                import spacy
+
+                _NLP = spacy.load("pl_core_news_sm")
+            except OSError:
+                _NLP = False
+    return _NLP or None
 
 
 class RecipeMatcher:
-    """
-    Matches spoken ingredients against a recipe database using TF-IDF.
-
-    Pipeline:
-    1. Load recipes from JSON files
-    2. Build TF-IDF index on ingredient strings
-    3. For a query (list of ingredients), compute cosine similarity
-    4. Return ranked list of matching recipes
-    """
-
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
-        self.recipes: List[Dict] = []
-        self.vectorizer: TfidfVectorizer = None
+        self.cache_path = os.path.join(self.data_dir, "recipe_index_cache.pkl")
+        self.recipes: list[Dict] = []
+        self.vectorizer: TfidfVectorizer | None = None
         self.tfidf_matrix = None
-        self.ingredient_vocab: Set[str] = set()
-        self._lemmatized: List[str] = []   # lemmatized ingredient text per recipe
+        self.ingredient_vocab: set[str] = set()
+        self._lemmatized: list[str] = []
+        self._recipe_terms: list[set[str]] = []
         self._lock = threading.Lock()
         self._loaded = False
 
     def load(self, progress_callback=None) -> int:
-        """Load all recipe JSON files from data_dir. Returns recipe count."""
         with self._lock:
             self.recipes = []
+            self.ingredient_vocab = set()
+            self._lemmatized = []
+            self._recipe_terms = []
+
+            if self._load_cache():
+                if progress_callback:
+                    progress_callback("Wczytano gotowy indeks przepisów.")
+                self._loaded = True
+                return len(self.recipes)
+
             pattern = os.path.join(self.data_dir, "recipes*.json")
             files = sorted(glob.glob(pattern))
-
             if not files:
-                # Try a single recipes.json
                 single = os.path.join(self.data_dir, "recipes.json")
                 if os.path.exists(single):
                     files = [single]
-
             if not files:
                 return 0
 
             for filepath in files:
                 try:
-                    with open(filepath, encoding="utf-8") as f:
-                        data = json.load(f)
-                    if isinstance(data, list):
-                        self.recipes.extend(data)
-                    elif isinstance(data, dict) and "recipes" in data:
-                        self.recipes.extend(data["recipes"])
+                    with open(filepath, encoding="utf-8") as handle:
+                        data = json.load(handle)
                 except Exception:
                     continue
+
+                if isinstance(data, list):
+                    self.recipes.extend(data)
+                elif isinstance(data, dict) and "recipes" in data:
+                    self.recipes.extend(data["recipes"])
 
             if not self.recipes:
                 return 0
@@ -70,26 +166,97 @@ class RecipeMatcher:
                 progress_callback(f"Indeksowanie {len(self.recipes)} przepisów...")
 
             self._build_index()
+            self._save_cache()
             self._loaded = True
             return len(self.recipes)
 
-    def _build_index(self):
-        """Build TF-IDF index from recipe ingredients."""
-        corpus = []
-        for recipe in self.recipes:
-            ingredients = recipe.get("ingredients", [])
-            if isinstance(ingredients, list):
-                text = " ".join(str(i).lower() for i in ingredients)
-            else:
-                text = str(ingredients).lower()
-            self._lemmatized.append(text)
-            corpus.append(text)
-            for word in text.split():
-                if len(word) > 2:
-                    self.ingredient_vocab.add(word)
+    def _source_state(self) -> list[tuple[str, int]]:
+        """Stan zrodel JSON: (nazwa_pliku, rozmiar). Bez mtime — po spakowaniu do EXE
+        PyInstaller ustawia nowe znaczniki czasu i cache z buildu nigdy by nie pasowal."""
+        files = sorted(glob.glob(os.path.join(self.data_dir, "recipes*.json")))
+        state: list[tuple[str, int]] = []
+        for filepath in files:
+            try:
+                stat = os.stat(filepath)
+            except OSError:
+                continue
+            state.append((os.path.basename(filepath), int(stat.st_size)))
+        return state
 
-        # char n-grams handle Polish morphology without any model
-        # "woda" shares "wod","oda" with "wody"; "marchewka" shares "marchew" with "marchewki"
+    def _canonical_state_from_stored(self, stored) -> list[tuple[str, int]]:
+        if not stored:
+            return []
+        out: list[tuple[str, int]] = []
+        for item in stored:
+            if len(item) == 3:
+                out.append((item[0], int(item[2])))
+            elif len(item) == 2:
+                out.append((item[0], int(item[1])))
+        return sorted(out)
+
+    def _load_cache(self) -> bool:
+        if not os.path.exists(self.cache_path):
+            return False
+        try:
+            with open(self.cache_path, "rb") as handle:
+                payload = pickle.load(handle)
+            current = sorted(self._source_state())
+            if self._canonical_state_from_stored(payload.get("source_state")) != current:
+                return False
+
+            self.recipes = payload["recipes"]
+            self.vectorizer = payload["vectorizer"]
+            self.tfidf_matrix = payload["tfidf_matrix"]
+            self.ingredient_vocab = payload["ingredient_vocab"]
+            self._lemmatized = payload["lemmatized"]
+            self._recipe_terms = payload["recipe_terms"]
+            return True
+        except Exception:
+            return False
+
+    def _save_cache(self):
+        payload = {
+            "source_state": self._source_state(),
+            "recipes": self.recipes,
+            "vectorizer": self.vectorizer,
+            "tfidf_matrix": self.tfidf_matrix,
+            "ingredient_vocab": self.ingredient_vocab,
+            "lemmatized": self._lemmatized,
+            "recipe_terms": self._recipe_terms,
+        }
+        with open(self.cache_path, "wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def _build_index(self):
+        raw_terms_per_recipe: list[set[str]] = []
+        previews_per_recipe: list[list[str]] = []
+        counter = Counter()
+
+        for recipe in self.recipes:
+            raw_ingredients = recipe.get("ingredients", [])
+            if not isinstance(raw_ingredients, list):
+                raw_ingredients = [raw_ingredients]
+
+            terms = self._extract_recipe_terms(raw_ingredients)
+            preview = self._build_preview_labels(raw_ingredients)
+            raw_terms_per_recipe.append(terms)
+            previews_per_recipe.append(preview)
+            counter.update(terms)
+
+        aliases = self._build_term_aliases(counter)
+
+        corpus: list[str] = []
+        for recipe, raw_terms, preview in zip(self.recipes, raw_terms_per_recipe, previews_per_recipe):
+            canonical_terms = {aliases.get(term, term) for term in raw_terms}
+            recipe["_search_terms"] = sorted(canonical_terms)
+            recipe["_preview_ingredients"] = preview
+
+            search_text = " ".join(sorted(canonical_terms))
+            self._recipe_terms.append(canonical_terms)
+            self._lemmatized.append(search_text)
+            corpus.append(search_text or normalize_text(" ".join(str(i) for i in recipe.get("ingredients", []))))
+            self.ingredient_vocab.update(canonical_terms)
+
         self.vectorizer = TfidfVectorizer(
             analyzer="char_wb",
             ngram_range=(3, 5),
@@ -99,41 +266,144 @@ class RecipeMatcher:
         )
         self.tfidf_matrix = self.vectorizer.fit_transform(corpus)
 
-    def search(
-        self,
-        ingredients: List[str],
-        mode: str = "any",   # "all" = must have all, "any" = ranked by count
-        top_n: int = 20,
-    ) -> List[Dict]:
-        """
-        Search recipes by ingredient list.
+    def _extract_recipe_terms(self, ingredients: list[str]) -> set[str]:
+        terms: set[str] = set()
+        nlp = _load_nlp()
 
-        mode="all": only recipes containing ALL ingredients (strict filter)
-        mode="any": rank by how many ingredients match (TF-IDF cosine)
-        """
+        for line in ingredients:
+            cleaned = self._clean_ingredient_line(line)
+            if not cleaned:
+                continue
+
+            if nlp:
+                doc = nlp(cleaned)
+                noun_found = False
+                for token in doc:
+                    if token.pos_ not in ("NOUN", "PROPN"):
+                        continue
+                    token_text = normalize_text(token.lemma_ or token.text)
+                    if not self._keep_token(token_text):
+                        continue
+                    noun_found = True
+                    terms.add(token_text)
+                if noun_found:
+                    continue
+            for token in tokenize_words(cleaned):
+                if self._keep_token(token):
+                    terms.add(canonical_token(token))
+
+        return terms
+
+    def _build_preview_labels(self, ingredients: list[str]) -> list[str]:
+        labels: list[str] = []
+        for line in ingredients:
+            label = self._short_ingredient_label(line)
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _build_term_aliases(self, counter: Counter) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+        representatives: list[str] = []
+
+        sorted_terms = sorted(
+            counter.items(),
+            key=lambda item: (-item[1], len(item[0]), item[0]),
+        )
+        for term, _ in sorted_terms:
+            matched_rep = next((rep for rep in representatives if tokens_match(term, rep)), None)
+            if matched_rep:
+                aliases[term] = matched_rep
+            else:
+                aliases[term] = term
+                representatives.append(term)
+        return aliases
+
+    def _clean_ingredient_line(self, line: str) -> str:
+        text = normalize_text(line)
+        text = re.sub(r"\([^)]*\)", " ", text)
+        text = re.split(r"\s[-;]\s", text, maxsplit=1)[0]
+        text = re.sub(r"\b\d+[.,]?\d*\b", " ", text)
+        text = re.sub(r"%", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _short_ingredient_label(self, line: str) -> str:
+        text = self._clean_ingredient_line(line)
+        words = []
+        for word in tokenize_words(text):
+            if self._keep_token(word, allow_units=False):
+                words.append(word)
+            if len(words) >= 5:
+                break
+        if not words:
+            return str(line).strip()
+        label = " ".join(words)
+        return label[:46].rstrip() + ("…" if len(label) > 46 else "")
+
+    def _keep_token(self, token: str, allow_units: bool = False) -> bool:
+        token = normalize_text(token)
+        if len(token) <= 2:
+            return False
+        if token in NOISE_WORDS:
+            return False
+        if not allow_units and token in UNIT_WORDS:
+            return False
+        if token.endswith(("ać", "eć", "ić", "yć", "ować")):
+            return False
+        return True
+
+    def search(self, ingredients: list[str], mode: str = "any", top_n: int = 20) -> list[Dict]:
         if not self._loaded or not self.recipes:
             return []
 
-        ingredients = [i.lower() for i in ingredients if i]
+        normalized = self._normalize_query_ingredients(ingredients)
+        if not normalized:
+            return []
 
         if mode == "all":
-            return self._filter_all(ingredients, top_n)
-        return self._rank_by_similarity(ingredients, top_n)
+            return self._filter_all(normalized, top_n)
+        return self._rank_by_similarity(normalized, top_n)
 
-    def _filter_all(self, ingredients: List[str], top_n: int) -> List[Dict]:
-        """Return recipes that contain ALL queried ingredients (using lemmatized text)."""
+    def _normalize_query_ingredients(self, ingredients: list[str]) -> list[str]:
+        result: list[str] = []
+        for ingredient in ingredients:
+            ingredient = normalize_text(ingredient)
+            if not ingredient:
+                continue
+            if any(tokens_match(ingredient, existing) for existing in result):
+                continue
+            result.append(ingredient)
+        return result
+
+    def _filter_all(self, ingredients: list[str], top_n: int) -> list[Dict]:
         results = []
         for idx, recipe in enumerate(self.recipes):
-            lem_text = self._lemmatized[idx] if idx < len(self._lemmatized) else ""
-            if all(self._ingredient_in_text(ing, lem_text) for ing in ingredients):
-                score = self._similarity_score(ingredients, lem_text)
+            if all(self._ingredient_matches_recipe(ing, idx) for ing in ingredients):
+                score = self._similarity_score(ingredients, idx)
                 results.append({**recipe, "_score": score, "_idx": idx})
+        results.sort(key=lambda item: (item["_score"], item.get("title", "")), reverse=True)
+        if results:
+            return results[:top_n]
 
-        results.sort(key=lambda r: r["_score"], reverse=True)
-        return results[:top_n]
+        minimum_matches = max(2, min(len(ingredients) - 1, (len(ingredients) + 1) // 2))
+        relaxed = []
+        for idx, recipe in enumerate(self.recipes):
+            matched_count = self.match_count(ingredients, idx)
+            if matched_count < minimum_matches:
+                continue
+            relaxed.append(
+                {
+                    **recipe,
+                    "_score": matched_count / len(ingredients),
+                    "_idx": idx,
+                    "_strict_relaxed": True,
+                }
+            )
+        relaxed.sort(key=lambda item: (item["_score"], item.get("title", "")), reverse=True)
+        return relaxed[:top_n]
 
-    def _rank_by_similarity(self, ingredients: List[str], top_n: int) -> List[Dict]:
-        """Rank recipes by TF-IDF cosine similarity to ingredient query."""
+    def _rank_by_similarity(self, ingredients: list[str], top_n: int) -> list[Dict]:
         query = " ".join(ingredients)
         query_vec = self.vectorizer.transform([query])
         scores = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
@@ -141,57 +411,69 @@ class RecipeMatcher:
         top_indices = np.argsort(scores)[::-1][:top_n]
         results = []
         for idx in top_indices:
-            if scores[idx] > 0:
-                results.append({**self.recipes[idx], "_score": float(scores[idx]), "_idx": int(idx)})
+            if scores[idx] <= 0:
+                continue
+            matched_count = self.match_count(ingredients, idx)
+            if matched_count == 0:
+                continue
+            results.append({**self.recipes[idx], "_score": float(scores[idx]), "_idx": int(idx)})
         return results
 
+    def match_count(self, ingredients: list[str], recipe_idx: int) -> int:
+        return len(self.matched_ingredients(ingredients, recipe_idx))
+
+    def matched_ingredients(self, ingredients: list[str], recipe_idx: int) -> list[str]:
+        if not (0 <= recipe_idx < len(self._recipe_terms)):
+            return []
+        matched = []
+        for ingredient in self._normalize_query_ingredients(ingredients):
+            if self._ingredient_matches_recipe(ingredient, recipe_idx):
+                matched.append(ingredient)
+        return matched
+
+    def _ingredient_matches_recipe(self, ingredient: str, recipe_idx: int) -> bool:
+        if not (0 <= recipe_idx < len(self._recipe_terms)):
+            return False
+
+        recipe_terms = self._recipe_terms[recipe_idx]
+        for recipe_term in recipe_terms:
+            if tokens_match(ingredient, recipe_term):
+                return True
+            if fuzz.ratio(ingredient, recipe_term) >= 78:
+                return True
+        return False
+
     def lemmatized_text(self, recipe_idx: int) -> str:
-        """Return lemmatized ingredient text for a recipe by index."""
         if 0 <= recipe_idx < len(self._lemmatized):
             return self._lemmatized[recipe_idx]
         return ""
 
+    def preview_ingredients(self, recipe: Dict) -> list[str]:
+        return recipe.get("_preview_ingredients", recipe.get("ingredients", []))
+
     def _ingredient_in_text(self, ingredient: str, recipe_text: str) -> bool:
-        """
-        Check if ingredient appears in recipe text.
-        Uses prefix matching to handle Polish inflection without any NLP model:
-          "woda"     matches "wody"     (shared prefix "wod")
-          "marchewka" matches "marchewki" (shared prefix "marchew")
-          "kurczak"  matches "kurczaka" (substring)
-        """
-        if not ingredient or len(ingredient) < 2:
-            return False
-        if ingredient in recipe_text:
-            return True
-
-        n = len(ingredient)
-        # prefix length: strip last 2 chars as potential inflection suffix
-        stem_len = max(3, n - 2)
-        ing_stem = ingredient[:stem_len]
-
-        for word in recipe_text.split():
-            if len(word) < 2:
-                continue
-            # substring check
-            if ingredient in word or word in ingredient:
+        for recipe_term in tokenize_words(recipe_text):
+            if tokens_match(ingredient, recipe_term):
                 return True
-            # prefix / stem check - handles most Polish noun inflections
-            if len(word) >= stem_len and word[:stem_len] == ing_stem:
+            if fuzz.ratio(normalize_text(ingredient), recipe_term) >= 78:
                 return True
-            # fuzzy fallback for typos or irregular forms
-            if len(word) >= 3 and fuzz.ratio(ingredient, word) >= 72:
-                return True
-
         return False
 
-    def _similarity_score(self, ingredients: List[str], recipe_text: str) -> float:
-        """Fraction of queried ingredients found in recipe."""
-        count = sum(1 for ing in ingredients if self._ingredient_in_text(ing, recipe_text))
-        return count / max(len(ingredients), 1)
+    def _similarity_score(self, ingredients: list[str], recipe_idx: int) -> float:
+        if not ingredients:
+            return 0.0
+        matched = self.match_count(ingredients, recipe_idx)
+        return matched / len(ingredients)
 
     @property
-    def vocabulary(self) -> Set[str]:
-        return self.ingredient_vocab
+    def vocabulary(self) -> set[str]:
+        if self.ingredient_vocab:
+            return self.ingredient_vocab
+        counter = Counter()
+        for recipe in self.recipes:
+            for item in recipe.get("_search_terms", []):
+                counter[item] += 1
+        return set(counter.keys())
 
     @property
     def is_loaded(self) -> bool:
