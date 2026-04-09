@@ -1,4 +1,6 @@
 openai-whisper
+transformers>=4.36.0
+vosk>=0.3.45
 customtkinter>=5.2.0
 sounddevice>=0.4.6
 soundfile>=0.12.1

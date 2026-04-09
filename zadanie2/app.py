@@ -1,3 +1,5 @@
+"""Pantry — Recipe Voice Filter GUI (offline: audio → STT → ingredients → recipes)."""
+
 import os
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -6,11 +8,17 @@ import sys
 import threading
 import time
 import unicodedata
+
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog
 
 
 def _asset_ready(asset_name: str, path: str) -> bool:
+    """Return whether an asset directory (data/models/translations) looks complete."""
     if not os.path.isdir(path):
         return False
     if asset_name == "data":
@@ -32,6 +40,7 @@ def _asset_ready(asset_name: str, path: str) -> bool:
 
 
 def _runtime_asset_dir(asset_name: str) -> str:
+    """Resolve path to data/models/translation_packages (next to EXE or under _MEIPASS when frozen)."""
     if getattr(sys, "frozen", False):
         exe_dir = os.path.dirname(sys.executable)
         bundled_dir = getattr(sys, "_MEIPASS", exe_dir)
@@ -68,10 +77,20 @@ for path in [DATA_DIR, MODELS_DIR, TRANSLATIONS_DIR]:
         os.makedirs(path, exist_ok=True)
 os.environ.setdefault("ARGOS_PACKAGES_DIR", TRANSLATIONS_DIR)
 
-from stt import AudioRecorder, load_model, transcribe
+from stt import (
+    AudioRecorder,
+    LANG_NAMES,
+    RECORDING_SAMPLE_RATE,
+    detect_language_code,
+    load_model,
+    transcribe_whisper,
+)
+from stt_hf_wav2vec import hf_wav2vec_transformers_available, transcribe_hf_wav2vec
+from stt_mms import mms_transformers_available, transcribe_mms
+from stt_vosk import transcribe_vosk, vosk_available
 from ingredient_extractor import extract_ingredients
 from recipe_matcher import RecipeMatcher
-from text_utils import tokens_match
+from text_utils import normalize_text, tokenize_words, tokens_match
 from translator import (
     TranslationUnavailable,
     configure_translation_packages,
@@ -82,26 +101,28 @@ from translator import (
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("dark-blue")
 
-# ── Palette: neutral, minimal ─────────────────────────────────────────────
-BG = "#edf2f7"
-PANEL = "#f8fbff"
+# ── Palette: sage + warm cream ────────────────────────────────────────────
+BG = "#f0eeea"
+PANEL = "#fefefe"
 CARD = "#ffffff"
-CARD_H = "#f4f8fc"
-ACCENT = "#2563eb"
-ACCENT_H = "#1d4ed8"
-ACCENT_SOFT = "#dbeafe"
-RED = "#dc2626"
-RED_H = "#b91c1c"
-GREEN = "#16a34a"
-GREEN_SOFT = "#dcfce7"
-AMBER = "#d97706"
-AMBER_SOFT = "#fef3c7"
-TEXT = "#0f172a"
-TEXT2 = "#334155"
-MUTED = "#64748b"
-DIM = "#94a3b8"
-BORDER = "#d9e2ec"
-TAG_BG = "#eef4ff"
+CARD_H = "#f7f5f0"
+ACCENT = "#3d6b50"      # sage herb green
+ACCENT_H = "#2e5440"
+ACCENT_SOFT = "#e2eeea"
+RED = "#b83030"
+RED_H = "#912525"
+GREEN = "#1a6640"
+GREEN_SOFT = "#e0f2e9"
+AMBER = "#9b6820"
+AMBER_SOFT = "#fef3d0"
+TEXT = "#1a1814"
+TEXT2 = "#3a3530"
+MUTED = "#7a736a"
+DIM = "#b0a89e"
+BORDER = "#d8d0c4"
+TAG_BG = "#ece7de"
+MATCH_FULL = "#1a5c35"
+MATCH_PART = "#7a4e10"
 
 TRANSLATION_LABELS = {
     "pl": "polski",
@@ -111,7 +132,7 @@ TRANSLATION_LABELS = {
     "es": "hiszpanski",
 }
 TRANSLATION_LABEL_TO_CODE = {label: code for code, label in TRANSLATION_LABELS.items()}
-# Argos zwraca też nazwę z polską literą — musi mapować na ten sam kod
+# Argos may return a label with a Polish character — map it to the same code
 TRANSLATION_LABEL_TO_CODE["hiszpański"] = "es"
 
 def _fold_label(s: str) -> str:
@@ -129,31 +150,25 @@ SPECIFIC_PROTEINS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _fuzzy_ingredient_match(ingredient: str, text: str) -> bool:
-    return any(tokens_match(ingredient, word) for word in text.lower().split())
+def _detail_match_reject(query_norm: str, word_norm: str) -> bool:
+    """Reject spurious fuzzy matches (e.g. potato vs potato starch/flour)."""
+    if not query_norm or not word_norm:
+        return False
+    if query_norm.startswith("ziemniak") and "ziemniaczan" in word_norm:
+        return True
+    return False
 
 
-def _flow_layout_chips(parent, items, bg_color, text_color, font_size=11, max_columns=4):
-    row_frame = ctk.CTkFrame(parent, fg_color="transparent")
-    row_frame.pack(fill="x", anchor="w", padx=2, pady=2)
-    col = 0
-    row_idx = 0
-    for item in items:
-        pill = ctk.CTkFrame(
-            row_frame,
-            fg_color=bg_color,
-            corner_radius=14,
-            border_width=1,
-            border_color=BORDER,
-        )
-        pill.grid(row=row_idx, column=col, padx=(0, 5), pady=2, sticky="w")
-        ctk.CTkLabel(
-            pill, text=item, font=ctk.CTkFont(size=font_size), text_color=text_color
-        ).pack(padx=10, pady=4)
-        col += 1
-        if col >= max_columns:
-            col = 0
-            row_idx += 1
+def _detail_line_matches_query_term(query: str, ingredient_line: str) -> bool:
+    """Match words in an ingredient line stricter than tokens_match alone (avoids potato vs starch confusion)."""
+    qn = normalize_text(query)
+    for word in tokenize_words(ingredient_line):
+        if not tokens_match(query, word):
+            continue
+        if _detail_match_reject(qn, normalize_text(word)):
+            continue
+        return True
+    return False
 
 
 # ── Animated status label ────────────────────────────────────────────────
@@ -197,107 +212,455 @@ class StatusDots:
 
 
 # ── Detail popup ─────────────────────────────────────────────────────────
+def _detail_translate_long(text: str, source: str, target: str) -> str:
+    """Argos can fail on very long blocks — split on paragraph breaks."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if len(t) < 2800:
+        return translate_text(t, source, target)
+    parts = [p.strip() for p in t.replace("\r\n", "\n").split("\n\n") if p.strip()]
+    if len(parts) <= 1:
+        parts = [ln.strip() for ln in t.split("\n") if ln.strip()]
+    if not parts:
+        return translate_text(t, source, target)
+    out = []
+    for p in parts:
+        out.append(translate_text(p, source, target))
+    return "\n\n".join(out)
+
+
 class DetailWindow(ctk.CTkToplevel):
-    def __init__(self, parent, recipe: dict, matched: list, total_asked: int = 0):
+    """Recipe detail window: ingredients, query match, instructions, translation."""
+
+    def __init__(
+        self,
+        parent,
+        recipe: dict,
+        matched: list,
+        total_asked: int = 0,
+        matched_supplement: list | None = None,
+    ):
         super().__init__(parent)
-        title = recipe.get("title", "Przepis")
-        self.title(title)
+        title_str = recipe.get("title", "Przepis")
+        self.title(title_str)
         self.geometry("720x700")
+        self.minsize(540, 480)
         self.resizable(True, True)
         self.configure(fg_color=BG)
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
         self.transient(parent)
-        self.after(50, self._finalize_window)
+        self._dcanvas = None
+        self._detail_win_id = None
 
-        # Header
-        hdr = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=72)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_columnconfigure(0, weight=1)
-        hdr.grid_propagate(False)
-
-        ctk.CTkLabel(
-            hdr, text=title,
-            font=ctk.CTkFont(size=17, weight="bold"), text_color=TEXT, anchor="w",
-        ).grid(row=0, column=0, padx=24, pady=(16, 2), sticky="w")
-
-        cat = recipe.get("category", "")
-        url = recipe.get("url", "")
-        meta = "  /  ".join(x for x in [cat, url] if x)
-        if meta:
-            ctk.CTkLabel(
-                hdr, text=meta, font=ctk.CTkFont(size=11), text_color=MUTED, anchor="w"
-            ).grid(row=1, column=0, padx=24, pady=(0, 12), sticky="w")
-
-        # Body
-        body = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
-        body.grid(row=1, column=0, sticky="nsew")
-        body.grid_columnconfigure(0, weight=1)
-
+        matched_for_lines = list(matched) + list(matched_supplement or [])
         ings = recipe.get("ingredients", [])
-        instructions = recipe.get("instructions", recipe.get("steps", ""))
-        row = 0
-        total_display = max(total_asked, len(matched))
+        if not isinstance(ings, list):
+            ings = []
+        instructions = recipe.get("instructions", recipe.get("steps", "")) or ""
+        cat = (recipe.get("category") or "").strip()
+        ing_count = len(ings)
 
-        if matched:
-            banner = ctk.CTkFrame(body, fg_color="#14291e", corner_radius=8)
-            banner.grid(row=row, column=0, sticky="ew", padx=24, pady=(20, 0))
-            banner.grid_columnconfigure(0, weight=1)
-            row += 1
-            ctk.CTkLabel(
-                banner,
-                text=f"Pasuje {len(matched)} z {total_display} skladnikow",
-                font=ctk.CTkFont(size=12, weight="bold"), text_color=GREEN, anchor="w",
-            ).grid(row=0, column=0, padx=14, pady=(10, 6), sticky="w")
-            chip_wrap = ctk.CTkFrame(banner, fg_color="transparent")
-            chip_wrap.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
-            _flow_layout_chips(chip_wrap, matched, GREEN, BG)
+        self._recipe = recipe
+        self._matched_core = list(matched)
+        self._matched_for_lines = matched_for_lines
+        self._total_asked = total_asked
+        self._orig_title = title_str
+        self._orig_cat = cat
+        self._orig_ings = [str(x) for x in ings]
+        self._orig_instructions = instructions if isinstance(instructions, str) else str(instructions)
+        self._row_match_flags = [
+            any(_detail_line_matches_query_term(m, str(ings[i])) for m in matched_for_lines)
+            for i in range(len(ings))
+        ]
+        self._detail_lang_labels: list[str] = []
+        self._detail_lang_to_code: dict[str, str | None] = {}
+        self._detail_translating = False
 
-        # Ingredients section
+        # ── Canvas-based scroll (no CTkScrollableFrame lag) ──────────────────
+        outer = tk.Frame(self, bg=BG)
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.grid_rowconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        self._dcanvas = canvas
+
+        sb = ctk.CTkScrollbar(outer, command=canvas.yview,
+                               button_color=ACCENT, button_hover_color=ACCENT_H)
+        sb.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=sb.set)
+
+        content = tk.Frame(canvas, bg=BG)
+        win_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        self._detail_win_id = win_id
+
+        def _on_content_resize(_e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        content.bind("<Configure>", _on_content_resize)
+
+        def _on_canvas_resize(e):
+            canvas.itemconfig(win_id, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        canvas.bind_all("<MouseWheel>", self._on_wheel)
+
+        P = 20
+
+        # ── HEADER ─────────────────────────────────────────────────────────
+        hdr = tk.Frame(content, bg=PANEL, relief="flat")
+        hdr.pack(fill="x", padx=P, pady=(18, 0))
+
+        self._detail_title_lbl = tk.Label(
+            hdr, text=title_str, bg=PANEL, fg=TEXT,
+            font=("Segoe UI", 20, "bold"),
+            anchor="w", justify="left", wraplength=640,
+        )
+        self._detail_title_lbl.pack(anchor="w", padx=18, pady=(16, 4))
+
+        meta_parts = []
+        if cat:
+            meta_parts.append(cat)
+        meta_parts.append(f"{ing_count} składników")
+        self._detail_meta_lbl = tk.Label(
+            hdr, text="  ·  ".join(meta_parts), bg=PANEL, fg=MUTED,
+            font=("Segoe UI", 12), anchor="w",
+        )
+        self._detail_meta_lbl.pack(anchor="w", padx=18, pady=(0, 8))
+
+        # ── Recipe display language (Argos offline) ───────────────────────
+        tr_wrap = ctk.CTkFrame(hdr, fg_color=PANEL, corner_radius=0)
+        tr_wrap.pack(fill="x", padx=14, pady=(0, 12))
         ctk.CTkLabel(
-            body,
-            text=f"Skladniki ({len(ings) if isinstance(ings, list) else '?'})",
-            font=ctk.CTkFont(size=13, weight="bold"), text_color=TEXT,
-        ).grid(row=row, column=0, padx=24, pady=(20, 8), sticky="w")
-        row += 1
+            tr_wrap, text="Język wyświetlania:",
+            font=ctk.CTkFont(size=12), text_color=TEXT2,
+        ).pack(side="left", padx=(4, 8))
 
-        ing_frame = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
-        ing_frame.grid(row=row, column=0, padx=24, sticky="ew")
-        ing_frame.grid_columnconfigure(0, weight=1)
-        row += 1
+        self._detail_lang_labels = ["Polski (oryginał)"]
+        self._detail_lang_to_code = {"Polski (oryginał)": None}
+        try:
+            for code, name in get_available_targets("pl"):
+                self._detail_lang_labels.append(name)
+                self._detail_lang_to_code[name] = code
+        except Exception:
+            pass
 
-        matched_lower = [m.lower() for m in matched]
-        if isinstance(ings, list):
-            for i, ing in enumerate(ings):
-                bg = CARD if i % 2 == 0 else CARD_H
-                r = ctk.CTkFrame(ing_frame, fg_color=bg, corner_radius=0, height=30)
-                r.grid(row=i, column=0, sticky="ew")
-                r.grid_columnconfigure(0, weight=1)
-                r.grid_propagate(False)
-                ing_str = str(ing)
-                is_matched = any(
-                    _fuzzy_ingredient_match(m, ing_str.lower()) for m in matched_lower
-                )
-                color = GREEN if is_matched else TEXT2
-                prefix = "+" if is_matched else " "
-                ctk.CTkLabel(
-                    r, text=f"  {prefix}  {ing_str}",
-                    font=ctk.CTkFont(size=12), text_color=color, anchor="w",
-                ).grid(row=0, column=0, sticky="w", padx=8)
+        self._detail_lang_var = ctk.StringVar(value=self._detail_lang_labels[0])
+        self._detail_lang_menu = ctk.CTkOptionMenu(
+            tr_wrap,
+            variable=self._detail_lang_var,
+            values=self._detail_lang_labels,
+            font=ctk.CTkFont(size=12),
+            fg_color=ACCENT,
+            button_color=ACCENT_H,
+            button_hover_color=ACCENT_H,
+            dropdown_fg_color=CARD,
+            dropdown_hover_color=CARD_H,
+            text_color="white",
+            width=200,
+            command=self._on_detail_language_selected,
+        )
+        self._detail_lang_menu.pack(side="left", padx=(0, 10))
 
-        if instructions:
-            ctk.CTkLabel(
-                body, text="Przygotowanie",
-                font=ctk.CTkFont(size=13, weight="bold"), text_color=TEXT,
-            ).grid(row=row, column=0, padx=24, pady=(24, 8), sticky="w")
-            row += 1
-            box = ctk.CTkTextbox(
-                body, font=ctk.CTkFont(size=12), fg_color=CARD, text_color=TEXT2,
-                corner_radius=8, wrap="word", height=300,
+        self._detail_tr_status = ctk.CTkLabel(
+            tr_wrap, text="", font=ctk.CTkFont(size=11), text_color=MUTED,
+        )
+        self._detail_tr_status.pack(side="left", fill="x", expand=True)
+
+        self._recipe_body = tk.Frame(content, bg=BG)
+        self._recipe_body.pack(fill="both", expand=True)
+
+        self._render_recipe_body(
+            title_str=title_str,
+            cat=cat,
+            ing_count=ing_count,
+            ings_display=self._orig_ings,
+            instructions_display=self._orig_instructions,
+            matched_for_lines=matched_for_lines,
+            matched_core=list(matched),
+            total_asked=total_asked,
+            ui_lang="pl",
+        )
+
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        self.after(60, self._finalize_window)
+
+    def _on_detail_language_selected(self, choice: str):
+        if self._detail_translating:
+            return
+        code = self._detail_lang_to_code.get(choice)
+        if code is None:
+            self._apply_detail_original()
+            return
+        self._detail_translating = True
+        self._detail_lang_menu.configure(state="disabled")
+        self._detail_tr_status.configure(text="Tłumaczenie…", text_color=ACCENT)
+        threading.Thread(target=self._detail_translate_worker, args=(code,), daemon=True).start()
+
+    def _apply_detail_original(self):
+        self._detail_tr_status.configure(text="", text_color=MUTED)
+        self.title(self._orig_title)
+        self._detail_title_lbl.configure(text=self._orig_title)
+        meta_parts = []
+        if self._orig_cat:
+            meta_parts.append(self._orig_cat)
+        meta_parts.append(f"{len(self._orig_ings)} składników")
+        self._detail_meta_lbl.configure(text="  ·  ".join(meta_parts))
+        for w in self._recipe_body.winfo_children():
+            w.destroy()
+        self._render_recipe_body(
+            title_str=self._orig_title,
+            cat=self._orig_cat,
+            ing_count=len(self._orig_ings),
+            ings_display=self._orig_ings,
+            instructions_display=self._orig_instructions,
+            matched_for_lines=self._matched_for_lines,
+            matched_core=self._matched_core,
+            total_asked=self._total_asked,
+            ui_lang="pl",
+        )
+        self._refresh_detail_scroll()
+
+    def _detail_translate_worker(self, target_code: str):
+        err: str | None = None
+        bundle: dict | None = None
+        try:
+            tgt = target_code.lower()
+            title_t = translate_text(self._orig_title, "pl", tgt)
+            cat_t = translate_text(self._orig_cat, "pl", tgt) if self._orig_cat else ""
+            ings_t = [translate_text(line, "pl", tgt) for line in self._orig_ings]
+            inst_t = _detail_translate_long(self._orig_instructions, "pl", tgt)
+            meta_count_t = translate_text(
+                f"{len(self._orig_ings)} składników", "pl", tgt
             )
-            box.grid(row=row, column=0, padx=24, pady=(0, 24), sticky="ew")
-            box.insert("1.0", instructions)
-            box.configure(state="disabled")
+            sk_h = translate_text("Składniki", "pl", tgt)
+            pr_h = translate_text("Przygotowanie", "pl", tgt)
+            matched = self._matched_core
+            total_asked = self._total_asked
+            matched_lines = self._matched_for_lines
+            if matched_lines and total_asked > 0:
+                sym = "✓" if len(matched) == total_asked else "~"
+                banner_line = translate_text(
+                    f"{sym}  {len(matched)} z {total_asked} składników dopasowanych",
+                    "pl",
+                    tgt,
+                )
+                pills_t = [translate_text(str(x), "pl", tgt) for x in matched_lines]
+            else:
+                banner_line = ""
+                pills_t = []
+            bundle = {
+                "title": title_t,
+                "cat": cat_t,
+                "meta_count": meta_count_t,
+                "ings": ings_t,
+                "instructions": inst_t,
+                "sk_header": f"{sk_h} ({len(self._orig_ings)})",
+                "prep_header": pr_h,
+                "banner_line": banner_line,
+                "pills": pills_t,
+                "is_full": len(matched) == total_asked if total_asked > 0 else True,
+                "target_code": tgt,
+            }
+        except TranslationUnavailable as exc:
+            err = str(exc)
+        except Exception as exc:
+            err = str(exc)
+
+        def done():
+            self._detail_translating = False
+            self._detail_lang_menu.configure(state="normal")
+            if err:
+                self._detail_tr_status.configure(text=err[:120], text_color=RED)
+                return
+            if bundle:
+                self._apply_detail_translated(bundle)
+
+        self.after(0, done)
+
+    def _apply_detail_translated(self, b: dict):
+        self._detail_tr_status.configure(text="", text_color=MUTED)
+        title_t = b["title"]
+        self.title(title_t)
+        self._detail_title_lbl.configure(text=title_t)
+        meta_parts = []
+        if (b.get("cat") or "").strip():
+            meta_parts.append(b["cat"].strip())
+        meta_parts.append(b["meta_count"])
+        self._detail_meta_lbl.configure(text="  ·  ".join(meta_parts))
+        for w in self._recipe_body.winfo_children():
+            w.destroy()
+        self._render_recipe_body(
+            title_str=title_t,
+            cat=b.get("cat") or "",
+            ing_count=len(self._orig_ings),
+            ings_display=b["ings"],
+            instructions_display=b["instructions"],
+            matched_for_lines=self._matched_for_lines,
+            matched_core=self._matched_core,
+            total_asked=self._total_asked,
+            ui_lang=b.get("target_code", "pl"),
+            banner_line_t=b.get("banner_line") or "",
+            pills_t=b.get("pills") or [],
+            is_full_banner=b.get("is_full", True),
+            ing_header_override=b.get("sk_header"),
+            prep_header_override=b.get("prep_header"),
+        )
+        self._refresh_detail_scroll()
+
+    def _refresh_detail_scroll(self):
+        try:
+            self.update_idletasks()
+            if self._dcanvas and self._detail_win_id:
+                self._dcanvas.configure(scrollregion=self._dcanvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _render_recipe_body(
+        self,
+        title_str: str,
+        cat: str,
+        ing_count: int,
+        ings_display: list[str],
+        instructions_display: str,
+        matched_for_lines: list,
+        matched_core: list,
+        total_asked: int,
+        ui_lang: str,
+        banner_line_t: str | None = None,
+        pills_t: list | None = None,
+        is_full_banner: bool = True,
+        ing_header_override: str | None = None,
+        prep_header_override: str | None = None,
+    ):
+        """Render recipe body into ``self._recipe_body`` (original or translated)."""
+        _ = (title_str, cat)
+        parent = self._recipe_body
+        P = 20
+        matched_for_lines = list(matched_for_lines)
+        pills_t = pills_t or []
+        banner_line_t = banner_line_t if banner_line_t is not None else None
+
+        # ── MATCH BANNER ────────────────────────────────────────────────────
+        if matched_for_lines and total_asked > 0:
+            if ui_lang == "pl":
+                is_full = len(matched_core) == total_asked
+                b_bg = "#e8f5ee" if is_full else "#fdf5e0"
+                b_fg = MATCH_FULL if is_full else MATCH_PART
+                sym = "✓" if is_full else "~"
+                banner_txt = f"{sym}  {len(matched_core)} z {total_asked} składników dopasowanych"
+                pill_items = [str(m) for m in matched_for_lines]
+            else:
+                is_full = is_full_banner
+                b_bg = "#e8f5ee" if is_full else "#fdf5e0"
+                b_fg = MATCH_FULL if is_full else MATCH_PART
+                banner_txt = banner_line_t or ""
+                pill_items = [str(x) for x in pills_t]
+
+            banner = tk.Frame(parent, bg=b_bg, relief="flat")
+            banner.pack(fill="x", padx=P, pady=(10, 0))
+
+            tk.Label(
+                banner, text=banner_txt,
+                bg=b_bg, fg=b_fg,
+                font=("Segoe UI", 13, "bold"), anchor="w",
+            ).pack(anchor="w", padx=16, pady=(12, 8))
+
+            pills_row = tk.Frame(banner, bg=b_bg)
+            pills_row.pack(anchor="w", padx=14, pady=(0, 12))
+            for m in pill_items:
+                tk.Label(
+                    pills_row, text=str(m),
+                    bg="#c8eed9" if is_full else "#f5e4b0",
+                    fg=b_fg,
+                    font=("Segoe UI", 11, "bold"), padx=10, pady=5,
+                ).pack(side="left", padx=(0, 6))
+
+        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=P, pady=(14, 0))
+
+        ing_heading = (
+            ing_header_override
+            if ing_header_override
+            else f"Składniki ({ing_count})"
+        )
+        tk.Label(
+            parent, text=ing_heading,
+            bg=BG, fg=TEXT,
+            font=("Segoe UI", 14, "bold"), anchor="w",
+        ).pack(anchor="w", padx=P + 4, pady=(16, 8))
+
+        ing_card = tk.Frame(parent, bg=CARD, relief="flat",
+                            highlightthickness=1, highlightbackground=BORDER)
+        ing_card.pack(fill="x", padx=P)
+
+        for i, ing_str in enumerate(ings_display):
+            is_m = self._row_match_flags[i] if i < len(self._row_match_flags) else False
+            row_bg = "#edf9f2" if is_m else (CARD if i % 2 == 0 else CARD_H)
+
+            row_f = tk.Frame(ing_card, bg=row_bg)
+            row_f.pack(fill="x")
+
+            sym = "✓" if is_m else " "
+            sym_fg = MATCH_FULL if is_m else DIM
+            tk.Label(row_f, text=sym, bg=row_bg, fg=sym_fg,
+                     font=("Segoe UI", 13, "bold"), width=3, anchor="center",
+                     ).pack(side="left", padx=(10, 4), pady=10)
+            tk.Label(row_f, text=ing_str, bg=row_bg,
+                     fg=MATCH_FULL if is_m else TEXT2,
+                     font=("Segoe UI", 13), anchor="w",
+                     ).pack(side="left", fill="x", expand=True, padx=(0, 16), pady=10)
+
+            if i < len(ings_display) - 1:
+                tk.Frame(ing_card, bg=BORDER, height=1).pack(fill="x")
+
+        if instructions_display:
+            tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", padx=P, pady=(18, 0))
+            prep_h = prep_header_override or "Przygotowanie"
+            tk.Label(
+                parent, text=prep_h,
+                bg=BG, fg=TEXT,
+                font=("Segoe UI", 14, "bold"), anchor="w",
+            ).pack(anchor="w", padx=P + 4, pady=(16, 8))
+
+            inst_box = ctk.CTkTextbox(
+                parent,
+                font=ctk.CTkFont(size=13),
+                fg_color=CARD,
+                text_color=TEXT2,
+                corner_radius=10,
+                border_width=1,
+                border_color=BORDER,
+                wrap="word",
+                height=min(400, max(120, instructions_display.count("\n") * 22 + 60)),
+            )
+            inst_box.pack(fill="x", padx=P, pady=(0, 24))
+            inst_box.insert("1.0", instructions_display)
+            inst_box.configure(state="disabled")
+        else:
+            tk.Frame(parent, bg=BG, height=24).pack()
+
+    def _on_wheel(self, event):
+        if not self._dcanvas:
+            return
+        try:
+            self._dcanvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        except Exception:
+            pass
+
+    def _on_destroy(self, event):
+        if event.widget is not self:
+            return
+        try:
+            self.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
+        try:
+            if hasattr(self.master, "_bind_recipe_scroll"):
+                self.master.after(80, self.master._bind_recipe_scroll)
+        except Exception:
+            pass
 
     def _finalize_window(self):
         try:
@@ -315,11 +678,13 @@ class DetailWindow(ctk.CTkToplevel):
 
 # ── Main App ─────────────────────────────────────────────────────────────
 class App(ctk.CTk):
+    """Main window: record/file audio, STT engine selection, recipe results, translation."""
+
     def __init__(self):
         super().__init__()
-        self.title("Recipe Voice Filter")
+        self.title("Pantry")
         self.geometry("1280x860")
-        self.minsize(1040, 720)
+        self.minsize(1040, 700)
         self.configure(fg_color=BG)
         self._center_window()
         configure_translation_packages(TRANSLATIONS_DIR)
@@ -335,6 +700,22 @@ class App(ctk.CTk):
         self.current_language: str = "pl"
         self._layout_refresh_job = None
         self._layout_mode = None
+
+        self._audio_buffer: np.ndarray | None = None
+        self._audio_buffer_hq: np.ndarray | None = None
+        self._audio_hq_sr: int = 16000
+        self._audio_meta: dict = {}
+        self._detected_lang: str | None = None
+        self._text_whisper: str = ""
+        self._text_vosk: str = ""
+        self._text_hf_wv: str = ""
+        self._text_mms: str = ""
+        self._lang_whisper: str | None = None
+        self._lang_vosk: str | None = None
+        self._lang_hf_wv: str | None = None
+        self._lang_mms: str | None = None
+        # stt_engine drives both model selection and recipe search source
+        self.stt_engine = ctk.StringVar(value="whisper")
 
         self._build_ui()
         self._refresh_layout()
@@ -359,406 +740,321 @@ class App(ctk.CTk):
         self._build_workspace_shell()
 
     def _build_header_bar(self):
-        header = ctk.CTkFrame(
-            self,
-            fg_color=PANEL,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
-        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
+        header = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, border_width=0, height=50)
+        header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
+        header.grid_rowconfigure(0, weight=1)
+        header.grid_propagate(False)
+
+        # Bottom border line
+        ctk.CTkFrame(header, fg_color=BORDER, height=1).place(relx=0, rely=1.0, relwidth=1, anchor="sw")
 
         ctk.CTkLabel(
-            header,
-            text="Recipe Voice Filter",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        ).grid(row=0, column=0, padx=22, pady=(14, 2), sticky="w")
-
-        ctk.CTkLabel(
-            header,
-            text="Nagranie i transkrypcja po lewej — lista przepisow po prawej.",
-            font=ctk.CTkFont(size=12),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=1, column=0, padx=22, pady=(0, 14), sticky="w")
+            header, text="Pantry",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=TEXT, anchor="w",
+        ).grid(row=0, column=0, padx=18, sticky="w")
 
         self.status_card = ctk.CTkFrame(
-            header,
-            fg_color=ACCENT_SOFT,
-            corner_radius=14,
-            border_width=1,
-            border_color=BORDER,
+            header, fg_color=ACCENT_SOFT, corner_radius=11,
+            border_width=1, border_color=BORDER,
         )
-        self.status_card.grid(row=0, column=1, rowspan=2, padx=22, pady=18, sticky="e")
+        self.status_card.grid(row=0, column=1, padx=14, sticky="e")
 
         self.lbl_status = ctk.CTkLabel(
-            self.status_card,
-            text="Uruchamianie...",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=TEXT2,
+            self.status_card, text="Uruchamianie...",
+            font=ctk.CTkFont(size=10, weight="bold"), text_color=TEXT2,
         )
-        self.lbl_status.pack(padx=12, pady=8)
+        self.lbl_status.pack(padx=11, pady=5)
 
     def _build_workspace_shell(self):
         self._main_frame = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        self._main_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 16))
+        self._main_frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         self._main_frame.grid_rowconfigure(0, weight=1)
         self._main_frame.grid_columnconfigure(0, weight=1)
 
         self.workspace = ctk.CTkFrame(self._main_frame, fg_color="transparent")
-        self.workspace.grid(row=0, column=0, sticky="nsew")
+        self.workspace.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self.workspace.grid_rowconfigure(0, weight=1)
-        self.workspace.grid_columnconfigure(0, weight=0, minsize=292)
+        self.workspace.grid_columnconfigure(0, weight=0, minsize=242)
         self.workspace.grid_columnconfigure(1, weight=1)
 
-        self.left_col = ctk.CTkFrame(self.workspace, fg_color="transparent", width=300)
+        self.left_col = ctk.CTkFrame(self.workspace, fg_color="transparent", width=248)
         self.right_col = ctk.CTkFrame(self.workspace, fg_color="transparent")
 
         self.input_card = self._build_input_card(self.left_col)
         self.transcription_card = self._build_transcription_card(self.left_col)
-        self.translation_card = self._build_translation_card(self.left_col)
-        self.ingredients_card = self._build_ingredients_card(self.left_col)
-        self.results_card = self._build_results_card(self.right_col)
 
         self.left_col.grid_columnconfigure(0, weight=1)
         self.input_card.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        self.transcription_card.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        self.translation_card.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        self.ingredients_card.grid(row=3, column=0, sticky="ew")
+        self.transcription_card.grid(row=1, column=0, sticky="ew")
 
         self.right_col.grid_rowconfigure(0, weight=1)
         self.right_col.grid_columnconfigure(0, weight=1)
+        self.results_card = self._build_results_card(self.right_col)
         self.results_card.grid(row=0, column=0, sticky="nsew")
 
-        self.left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        self.left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.right_col.grid(row=0, column=1, sticky="nsew")
 
-        self._overlay = ctk.CTkFrame(self._main_frame, fg_color=BG, corner_radius=24)
+        self._overlay = ctk.CTkFrame(self._main_frame, fg_color=BG, corner_radius=0)
         self._overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-        center = ctk.CTkFrame(
-            self._overlay,
-            fg_color=CARD,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
+        center = ctk.CTkFrame(self._overlay, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER)
         center.place(relx=0.5, rely=0.43, anchor="center")
 
         ctk.CTkLabel(
-            center,
-            text="Recipe Voice Filter",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=TEXT,
-        ).pack(padx=34, pady=(24, 6))
+            center, text="Pantry",
+            font=ctk.CTkFont(size=18, weight="bold"), text_color=TEXT,
+        ).pack(padx=32, pady=(22, 6))
 
         self.lbl_loading_step = ctk.CTkLabel(
-            center,
-            text="Inicjalizacja",
-            font=ctk.CTkFont(size=12),
-            text_color=MUTED,
+            center, text="Inicjalizacja",
+            font=ctk.CTkFont(size=11), text_color=MUTED,
         )
-        self.lbl_loading_step.pack(pady=(0, 18))
+        self.lbl_loading_step.pack(pady=(0, 14))
 
         self.progress_bar = ctk.CTkProgressBar(
-            center,
-            width=250,
-            height=6,
-            mode="indeterminate",
-            progress_color=ACCENT,
-            fg_color=ACCENT_SOFT,
+            center, width=220, height=5, mode="indeterminate",
+            progress_color=ACCENT, fg_color=ACCENT_SOFT,
         )
-        self.progress_bar.pack(padx=34, pady=(0, 24))
+        self.progress_bar.pack(padx=32, pady=(0, 22))
         self.progress_bar.start()
 
     def _build_input_card(self, parent):
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
+        card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=14, border_width=1, border_color=BORDER)
         card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(4, weight=1)
+        card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
-            card,
-            text="Audio",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
-
-        ctk.CTkLabel(
-            card,
-            text="Mikrofon lub plik",
-            font=ctk.CTkFont(size=10),
-            text_color=MUTED,
-            justify="left",
-        ).grid(row=1, column=0, padx=12, pady=(0, 6), sticky="w")
+            card, text="Audio",
+            font=ctk.CTkFont(size=11, weight="bold"), text_color=TEXT, anchor="w",
+        ).grid(row=0, column=0, columnspan=2, padx=11, pady=(8, 4), sticky="w")
 
         self.btn_record = ctk.CTkButton(
-            card,
-            text="Nagraj",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            height=38,
-            corner_radius=16,
-            fg_color=ACCENT,
-            hover_color=ACCENT_H,
-            text_color="white",
+            card, text="Nagraj",
+            font=ctk.CTkFont(size=11, weight="bold"), height=32, corner_radius=12,
+            fg_color=ACCENT, hover_color=ACCENT_H, text_color="white",
             command=self._toggle_recording,
         )
-        self.btn_record.grid(row=2, column=0, padx=12, sticky="ew")
+        self.btn_record.grid(row=1, column=0, padx=(11, 4), sticky="ew")
 
         self.btn_file = ctk.CTkButton(
-            card,
-            text="Wczytaj plik",
-            font=ctk.CTkFont(size=10),
-            height=30,
-            corner_radius=14,
-            fg_color=CARD,
-            hover_color=CARD_H,
-            text_color=TEXT2,
-            border_width=1,
-            border_color=BORDER,
-            command=self._load_file,
+            card, text="Wczytaj plik",
+            font=ctk.CTkFont(size=10), height=32, corner_radius=12,
+            fg_color=CARD, hover_color=CARD_H, text_color=TEXT2,
+            border_width=1, border_color=BORDER, command=self._load_file,
         )
-        self.btn_file.grid(row=3, column=0, padx=12, pady=(4, 8), sticky="ew")
+        self.btn_file.grid(row=1, column=1, padx=(4, 11), sticky="ew")
+
+        self.lbl_audio_meta = ctk.CTkLabel(
+            card, text="Brak nagrania",
+            font=ctk.CTkFont(size=9), text_color=MUTED, anchor="w",
+        )
+        self.lbl_audio_meta.grid(row=2, column=0, columnspan=2, padx=11, pady=(3, 2), sticky="ew")
+
+        self.btn_save_audio = ctk.CTkButton(
+            card, text="Zapisz WAV",
+            font=ctk.CTkFont(size=9), height=24, corner_radius=10,
+            fg_color=CARD, hover_color=CARD_H, text_color=TEXT2,
+            border_width=1, border_color=BORDER,
+            command=self._save_audio_buffer, state="disabled",
+        )
+        self.btn_save_audio.grid(row=3, column=0, padx=(11, 4), pady=(0, 8), sticky="ew")
+
+        self.btn_play_audio = ctk.CTkButton(
+            card, text="Odtworz",
+            font=ctk.CTkFont(size=9), height=24, corner_radius=10,
+            fg_color=CARD, hover_color=CARD_H, text_color=TEXT2,
+            border_width=1, border_color=BORDER,
+            command=self._play_audio_buffer, state="disabled",
+        )
+        self.btn_play_audio.grid(row=3, column=1, padx=(4, 11), pady=(0, 8), sticky="ew")
         return card
 
     def _build_transcription_card(self, parent):
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
+        card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=14, border_width=1, border_color=BORDER)
         card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(2, weight=1)
 
+        # ── Header ─────────────────────────────────────────────────────────
         head = ctk.CTkFrame(card, fg_color="transparent")
-        head.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 4))
+        head.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
         head.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            head,
-            text="Transkrypcja",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=0, column=0, sticky="w")
-
-        self.lbl_language = ctk.CTkLabel(
-            head,
-            text="",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color=TEXT2,
-        )
+        ctk.CTkLabel(head, text="Transkrypcja", font=ctk.CTkFont(size=11, weight="bold"), text_color=TEXT).grid(row=0, column=0, sticky="w")
+        self.lbl_language = ctk.CTkLabel(head, text="", font=ctk.CTkFont(size=9), text_color=MUTED)
         self.lbl_language.grid(row=0, column=1, sticky="e")
 
-        ctk.CTkLabel(
-            card,
-            text="Rozpoznany tekst",
+        # ── Model selector ─────────────────────────────────────────────────
+        model_frame = ctk.CTkFrame(card, fg_color=BG, corner_radius=10)
+        model_frame.grid(row=1, column=0, padx=12, pady=(4, 4), sticky="ew")
+        model_frame.grid_columnconfigure(0, weight=1)
+
+        self.rb_whisper = ctk.CTkRadioButton(
+            model_frame, text="Whisper small", variable=self.stt_engine, value="whisper",
+            font=ctk.CTkFont(size=10), text_color=TEXT,
+            fg_color=ACCENT, hover_color=ACCENT_H,
+            command=self._on_engine_change,
+        )
+        self.rb_whisper.grid(row=0, column=0, padx=10, pady=(8, 4), sticky="w")
+
+        self.btn_stt = ctk.CTkButton(
+            model_frame, text="Transkrybuj", font=ctk.CTkFont(size=9, weight="bold"),
+            height=26, width=90, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_H, text_color="white",
+            command=self._transcribe_action, state="disabled",
+        )
+        self.btn_stt.grid(row=0, column=1, rowspan=4, padx=(4, 8), pady=8, sticky="e")
+
+        self.rb_vosk = ctk.CTkRadioButton(
+            model_frame, text="Vosk PL/EN", variable=self.stt_engine, value="vosk",
+            font=ctk.CTkFont(size=10), text_color=TEXT,
+            fg_color=ACCENT, hover_color=ACCENT_H,
+            command=self._on_engine_change,
+        )
+        self.rb_vosk.grid(row=1, column=0, padx=10, pady=(0, 4), sticky="w")
+
+        self.rb_hf_wv = ctk.CTkRadioButton(
+            model_frame,
+            text="Wav2Vec2 XLS-R (HF, Meta) PL/EN",
+            variable=self.stt_engine,
+            value="hf_wav2vec",
             font=ctk.CTkFont(size=10),
-            text_color=MUTED,
-        ).grid(row=1, column=0, padx=12, sticky="w")
-
-        self.txt_transcription = ctk.CTkTextbox(
-            card,
-            height=76,
-            font=ctk.CTkFont(size=11),
-            fg_color=CARD,
-            text_color=TEXT2,
-            corner_radius=16,
-            border_width=1,
-            border_color=BORDER,
-            wrap="word",
-        )
-        self.txt_transcription.grid(row=2, column=0, padx=12, pady=(2, 8), sticky="ew")
-        return card
-
-    def _build_translation_card(self, parent):
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
-        card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            card,
-            text="Tlumaczenie (offline)",
-            font=ctk.CTkFont(size=13, weight="bold"),
             text_color=TEXT,
-        ).grid(row=0, column=0, padx=12, pady=(8, 2), sticky="w")
-
-        controls = ctk.CTkFrame(card, fg_color="transparent")
-        controls.grid(row=1, column=0, sticky="ew", padx=12)
-        controls.grid_columnconfigure(0, weight=1)
-
-        self.combo_translate = ctk.CTkOptionMenu(
-            controls,
-            values=[name for code, name in TRANSLATION_LABELS.items() if code != "pl"],
-            font=ctk.CTkFont(size=11),
             fg_color=ACCENT,
-            button_color=ACCENT_H,
-            button_hover_color=ACCENT_H,
-            dropdown_fg_color=CARD,
-            dropdown_hover_color=CARD_H,
-            text_color="white",
-            dynamic_resizing=False,
+            hover_color=ACCENT_H,
+            command=self._on_engine_change,
+        )
+        self.rb_hf_wv.grid(row=2, column=0, padx=10, pady=(0, 4), sticky="w")
+
+        self.rb_mms = ctk.CTkRadioButton(
+            model_frame,
+            text="Meta MMS-1B ASR (HF) PL/EN",
+            variable=self.stt_engine,
+            value="meta_mms",
+            font=ctk.CTkFont(size=10),
+            text_color=TEXT,
+            fg_color=ACCENT,
+            hover_color=ACCENT_H,
+            command=self._on_engine_change,
+        )
+        self.rb_mms.grid(row=3, column=0, padx=10, pady=(0, 8), sticky="w")
+
+        self.lbl_vosk_hint = ctk.CTkLabel(card, text="", font=ctk.CTkFont(size=8), text_color=AMBER, anchor="w", wraplength=220)
+        self.lbl_vosk_hint.grid(row=2, column=0, padx=12, sticky="ew")
+        self.lbl_vosk_hint.grid_remove()
+
+        # ── Single transcription text ───────────────────────────────────────
+        self.txt_stt = ctk.CTkTextbox(card, height=60, font=ctk.CTkFont(size=10), fg_color=BG, text_color=TEXT2, corner_radius=8, border_width=0, wrap="word")
+        self.txt_stt.grid(row=3, column=0, padx=12, pady=(4, 4), sticky="ew")
+        self.txt_whisper = self.txt_stt
+        self.txt_vosk = self.txt_stt
+
+        # ── Translation section ─────────────────────────────────────────────
+        ctk.CTkFrame(card, fg_color=BORDER, height=1).grid(row=4, column=0, padx=12, pady=(6, 8), sticky="ew")
+
+        ctk.CTkLabel(card, text="Tłumaczenie", font=ctk.CTkFont(size=10, weight="bold"), text_color=TEXT, anchor="w").grid(row=5, column=0, padx=12, pady=(0, 4), sticky="w")
+
+        tr_ctrl = ctk.CTkFrame(card, fg_color="transparent")
+        tr_ctrl.grid(row=6, column=0, padx=12, sticky="ew")
+        tr_ctrl.grid_columnconfigure(0, weight=1)
+        self.combo_translate = ctk.CTkOptionMenu(
+            tr_ctrl,
+            values=[name for code, name in TRANSLATION_LABELS.items() if code != "pl"],
+            font=ctk.CTkFont(size=10),
+            fg_color=ACCENT, button_color=ACCENT_H, button_hover_color=ACCENT_H,
+            dropdown_fg_color=CARD, dropdown_hover_color=CARD_H,
+            text_color="white", dynamic_resizing=False,
         )
         self.combo_translate.grid(row=0, column=0, sticky="ew")
+        self.btn_translate = ctk.CTkButton(tr_ctrl, text="Tłumacz", font=ctk.CTkFont(size=9, weight="bold"), height=28, width=64, corner_radius=8, fg_color=TEXT, hover_color=TEXT2, text_color="white", command=self._translate)
+        self.btn_translate.grid(row=0, column=1, padx=(5, 0))
+        self.btn_copy = ctk.CTkButton(tr_ctrl, text="Kopiuj", font=ctk.CTkFont(size=8), height=28, width=50, corner_radius=8, fg_color=CARD, hover_color=CARD_H, text_color=TEXT2, border_width=1, border_color=BORDER, command=self._copy_translation)
+        self.btn_copy.grid(row=0, column=2, padx=(4, 0))
 
-        self.btn_translate = ctk.CTkButton(
-            controls,
-            text="Tlumacz",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            height=30,
-            width=84,
-            corner_radius=14,
-            fg_color=TEXT,
-            hover_color=TEXT2,
-            text_color="white",
-            command=self._translate,
-        )
-        self.btn_translate.grid(row=0, column=1, padx=(8, 6))
-
-        self.btn_copy = ctk.CTkButton(
-            controls,
-            text="Kopiuj",
-            font=ctk.CTkFont(size=9),
-            height=30,
-            width=64,
-            corner_radius=14,
-            fg_color=CARD,
-            hover_color=CARD_H,
-            text_color=TEXT2,
-            border_width=1,
-            border_color=BORDER,
-            command=self._copy_translation,
-        )
-        self.btn_copy.grid(row=0, column=2)
-
-        self.txt_translation = ctk.CTkTextbox(
-            card,
-            height=58,
-            font=ctk.CTkFont(size=11),
-            fg_color=CARD,
-            text_color=MUTED,
-            corner_radius=16,
-            border_width=1,
-            border_color=BORDER,
-            wrap="word",
-        )
-        self.txt_translation.grid(row=2, column=0, padx=12, pady=(6, 4), sticky="ew")
-        self.txt_translation.insert("1.0", "Wynik tlumaczenia pojawi sie tutaj.")
+        self.txt_translation = ctk.CTkTextbox(card, height=42, font=ctk.CTkFont(size=10), fg_color=BG, text_color=MUTED, corner_radius=8, border_width=0, wrap="word")
+        self.txt_translation.grid(row=7, column=0, padx=12, pady=(4, 2), sticky="ew")
+        self.txt_translation.insert("1.0", "Wynik tłumaczenia pojawi się tutaj.")
         self.txt_translation.configure(state="disabled")
 
-        self.lbl_translation_state = ctk.CTkLabel(
-            card,
-            text="Sprawdzanie pakietow offline...",
-            font=ctk.CTkFont(size=9),
-            text_color=GREEN,
-            anchor="w",
-            justify="left",
-        )
-        self.lbl_translation_state.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
+        self.lbl_translation_state = ctk.CTkLabel(card, text="Sprawdzanie pakietów...", font=ctk.CTkFont(size=8), text_color=GREEN, anchor="w")
+        self.lbl_translation_state.grid(row=8, column=0, padx=12, pady=(0, 10), sticky="ew")
         return card
 
-    def _build_ingredients_card(self, parent):
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
-        card.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            card,
-            text="Skladniki (do wyszukiwania)",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=TEXT,
-        ).grid(row=0, column=0, padx=12, pady=(8, 4), sticky="w")
-
-        self.ingredients_frame = ctk.CTkScrollableFrame(
-            card,
-            height=88,
-            fg_color=CARD,
-            corner_radius=16,
-            border_width=1,
-            border_color=BORDER,
-            scrollbar_button_color=CARD_H,
-            scrollbar_button_hover_color=ACCENT_SOFT,
-        )
-        self.ingredients_frame.grid(row=1, column=0, padx=12, sticky="nsew")
-
-        self.lbl_filter_info = ctk.CTkLabel(
-            card,
-            text="",
-            font=ctk.CTkFont(size=9),
-            text_color=MUTED,
-            justify="left",
-            anchor="w",
-            wraplength=250,
-        )
-        self.lbl_filter_info.grid(row=2, column=0, padx=12, pady=(4, 8), sticky="ew")
-        return card
 
     def _build_results_card(self, parent):
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL,
-            corner_radius=22,
-            border_width=1,
-            border_color=BORDER,
-        )
-        card.grid_rowconfigure(2, weight=1)
+        card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=14, border_width=1, border_color=BORDER)
+        card.grid_rowconfigure(3, weight=1)
         card.grid_columnconfigure(0, weight=1)
 
-        self.lbl_results_count = ctk.CTkLabel(
-            card,
-            text="Przepisy",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        )
-        self.lbl_results_count.grid(row=0, column=0, padx=18, pady=(14, 4), sticky="w")
+        # ── Header ──────────────────────────────────────────────────────────
+        hdr = ctk.CTkFrame(card, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 2))
+        hdr.grid_columnconfigure(0, weight=1)
+        self.lbl_results_count = ctk.CTkLabel(hdr, text="Przepisy", font=ctk.CTkFont(size=17, weight="bold"), text_color=TEXT, anchor="w")
+        self.lbl_results_count.grid(row=0, column=0, sticky="w")
+        self.lbl_results_sub = ctk.CTkLabel(hdr, text="Wyniki pojawia sie po transkrypcji.", font=ctk.CTkFont(size=10), text_color=MUTED, anchor="w")
+        self.lbl_results_sub.grid(row=1, column=0, sticky="w")
 
-        self.lbl_results_sub = ctk.CTkLabel(
-            card,
-            text="Wyniki pojawia sie po transkrypcji.",
-            font=ctk.CTkFont(size=12),
-            text_color=MUTED,
-            anchor="w",
-        )
-        self.lbl_results_sub.grid(row=1, column=0, padx=18, sticky="w")
+        # ── Ingredient pills ───────────────────────────────────────────────
+        pills_wrap = ctk.CTkFrame(card, fg_color="transparent")
+        pills_wrap.grid(row=1, column=0, sticky="ew", padx=14, pady=(2, 2))
+        pills_wrap.grid_columnconfigure(0, weight=1)
+        self.ingredients_frame = tk.Frame(pills_wrap, bg=PANEL)
+        self.ingredients_frame.grid(row=0, column=0, sticky="w")
+        self.lbl_filter_info = ctk.CTkLabel(pills_wrap, text="", font=ctk.CTkFont(size=8), text_color=MUTED, anchor="w")
+        self.lbl_filter_info.grid(row=1, column=0, sticky="ew")
 
-        self.results_scroll = ctk.CTkScrollableFrame(
-            card,
-            fg_color="transparent",
-            corner_radius=0,
-            scrollbar_button_color=CARD_H,
-            scrollbar_button_hover_color=ACCENT_SOFT,
-        )
-        self.results_scroll.grid(row=2, column=0, sticky="nsew", padx=18, pady=(12, 16))
-        self.results_scroll.grid_columnconfigure(0, weight=1)
+        ctk.CTkFrame(card, fg_color=BORDER, height=1).grid(row=2, column=0, sticky="ew", padx=14, pady=(4, 6))
+
+        # ── Canvas scroll area ───────────────────────────────────────────────
+        scroll_area = tk.Frame(card, bg=PANEL)
+        scroll_area.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 10))
+        scroll_area.grid_rowconfigure(0, weight=1)
+        scroll_area.grid_columnconfigure(0, weight=1)
+
+        self._recipe_canvas = tk.Canvas(scroll_area, bg=PANEL, highlightthickness=0, bd=0)
+        self._recipe_canvas.grid(row=0, column=0, sticky="nsew")
+
+        _sb = ctk.CTkScrollbar(scroll_area, command=self._recipe_canvas.yview)
+        _sb.grid(row=0, column=1, sticky="ns")
+        self._recipe_canvas.configure(yscrollcommand=_sb.set)
+
+        self.results_scroll = tk.Frame(self._recipe_canvas, bg=PANEL)
+        self._recipe_canvas_win = self._recipe_canvas.create_window((0, 0), window=self.results_scroll, anchor="nw")
+        self.results_scroll.grid_columnconfigure(0, weight=1, uniform="rcol")
+        self.results_scroll.grid_columnconfigure(1, weight=1, uniform="rcol")
+
+        def _on_inner_configure(_e):
+            self._recipe_canvas.configure(scrollregion=self._recipe_canvas.bbox("all"))
+        self.results_scroll.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_resize(e):
+            self._recipe_canvas.itemconfig(self._recipe_canvas_win, width=e.width)
+        self._recipe_canvas.bind("<Configure>", _on_canvas_resize)
+
+        self._recipe_canvas.bind("<Enter>", self._bind_recipe_scroll)
+        self._recipe_canvas.bind("<Leave>", self._unbind_recipe_scroll)
+        self.results_scroll.bind("<Enter>", self._bind_recipe_scroll)
 
         self._empty_label = ctk.CTkLabel(
             self.results_scroll,
-            text="Brak wynikow.\nDodaj nagranie, a tutaj pojawia sie dopasowane przepisy.",
-            font=ctk.CTkFont(size=14),
-            text_color=DIM,
-            justify="center",
+            text="Brak wyników.\nNagraj głos lub wczytaj plik audio.",
+            font=ctk.CTkFont(size=13), text_color=DIM, justify="center",
         )
-        self._empty_label.grid(row=0, column=0, pady=110)
+        self._empty_label.grid(row=0, column=0, pady=80)
         return card
+
+    def _bind_recipe_scroll(self, _=None):
+        self._recipe_canvas.bind_all("<MouseWheel>", self._on_recipe_scroll)
+
+    def _unbind_recipe_scroll(self, _=None):
+        try:
+            self._recipe_canvas.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
+
+    def _on_recipe_scroll(self, event):
+        self._recipe_canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     def _schedule_layout_refresh(self, event=None):
         if event is not None and event.widget is not self:
@@ -796,411 +1092,19 @@ class App(ctk.CTk):
         self._reset_grid(self.workspace, 3, 3)
 
         if mode == "wide":
-            self.workspace.grid_columnconfigure(0, weight=0, minsize=292)
+            self.workspace.grid_columnconfigure(0, weight=0, minsize=242)
             self.workspace.grid_columnconfigure(1, weight=1)
             self.workspace.grid_rowconfigure(0, weight=1)
-            self.left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+            self.left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
             self.right_col.grid(row=0, column=1, sticky="nsew")
-            self.lbl_filter_info.configure(wraplength=280)
             return
 
         self.workspace.grid_columnconfigure(0, weight=1)
         self.workspace.grid_rowconfigure(0, weight=1)
         self.workspace.grid_rowconfigure(1, weight=0)
-        self.right_col.grid(row=0, column=0, sticky="nsew", pady=(0, 12))
+        self.right_col.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         self.left_col.grid(row=1, column=0, sticky="ew")
-        self.lbl_filter_info.configure(wraplength=560)
 
-    def _build_sidebar(self):
-        side = ctk.CTkFrame(
-            self,
-            fg_color=PANEL,
-            corner_radius=24,
-            border_width=1,
-            border_color=BORDER,
-            width=368,
-        )
-        side.grid(row=0, column=0, sticky="nsew", padx=(20, 12), pady=20)
-        side.grid_propagate(False)
-        side.grid_columnconfigure(0, weight=1)
-        side.grid_rowconfigure(2, weight=1)
-
-        hero = ctk.CTkFrame(side, fg_color="transparent")
-        hero.grid(row=0, column=0, padx=24, pady=(22, 14), sticky="ew")
-        hero.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            hero,
-            text="Recipe Voice Filter",
-            font=ctk.CTkFont(size=23, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-
-        ctk.CTkLabel(
-            hero,
-            text="Filtrowanie przepisow z nagrania lub pliku audio.",
-            font=ctk.CTkFont(size=12),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(6, 12))
-
-        self.status_card = ctk.CTkFrame(
-            hero,
-            fg_color=ACCENT_SOFT,
-            corner_radius=14,
-            border_width=1,
-            border_color=BORDER,
-        )
-        self.status_card.grid(row=2, column=0, sticky="w")
-
-        self.lbl_status = ctk.CTkLabel(
-            self.status_card,
-            text="Uruchamianie...",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=TEXT2,
-        )
-        self.lbl_status.pack(padx=12, pady=7)
-
-        capture = ctk.CTkFrame(
-            side,
-            fg_color=CARD,
-            corner_radius=20,
-            border_width=1,
-            border_color=BORDER,
-        )
-        capture.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="ew")
-        capture.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            capture,
-            text="Wyszukiwanie glosowe",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        ).grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
-
-        ctk.CTkLabel(
-            capture,
-            text="Podaj skladniki glosem albo wybierz gotowy plik audio.",
-            font=ctk.CTkFont(size=11),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=1, column=0, padx=16, pady=(0, 14), sticky="w")
-
-        self.btn_record = ctk.CTkButton(
-            capture,
-            text="Nagraj",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            height=52,
-            corner_radius=14,
-            fg_color=ACCENT,
-            hover_color=ACCENT_H,
-            text_color=BG,
-            command=self._toggle_recording,
-        )
-        self.btn_record.grid(row=2, column=0, padx=16, sticky="ew")
-
-        self.btn_file = ctk.CTkButton(
-            capture,
-            text="Wczytaj plik audio",
-            font=ctk.CTkFont(size=12),
-            height=38,
-            corner_radius=12,
-            fg_color="transparent",
-            hover_color=CARD_H,
-            border_width=1,
-            border_color=BORDER,
-            text_color=TEXT2,
-            command=self._load_file,
-        )
-        self.btn_file.grid(row=3, column=0, padx=16, pady=(8, 16), sticky="ew")
-
-        self.sidebar_tabs = ctk.CTkTabview(
-            side,
-            fg_color=CARD,
-            corner_radius=20,
-            border_width=1,
-            border_color=BORDER,
-            segmented_button_fg_color=BG,
-            segmented_button_selected_color=ACCENT,
-            segmented_button_selected_hover_color=ACCENT_H,
-            segmented_button_unselected_color=TAG_BG,
-            segmented_button_unselected_hover_color=CARD_H,
-            text_color=TEXT,
-            anchor="n",
-        )
-        self.sidebar_tabs.grid(row=2, column=0, padx=24, pady=(0, 24), sticky="nsew")
-
-        trans_tab = self.sidebar_tabs.add("Transkrypcja")
-        ing_tab = self.sidebar_tabs.add("Skladniki")
-        tr_tab = self.sidebar_tabs.add("Tlumaczenie")
-        for tab in (trans_tab, ing_tab, tr_tab):
-            tab.grid_columnconfigure(0, weight=1)
-
-        trans_head = ctk.CTkFrame(trans_tab, fg_color="transparent")
-        trans_head.grid(row=0, column=0, sticky="ew", pady=(6, 8))
-        trans_head.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            trans_head,
-            text="Tekst rozpoznany przez model mowy",
-            font=ctk.CTkFont(size=11),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-
-        self.lbl_language = ctk.CTkLabel(
-            trans_head,
-            text="",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color=TEXT2,
-        )
-        self.lbl_language.grid(row=0, column=1, sticky="e")
-
-        self.txt_transcription = ctk.CTkTextbox(
-            trans_tab,
-            height=190,
-            font=ctk.CTkFont(size=12),
-            fg_color=BG,
-            text_color=TEXT2,
-            corner_radius=14,
-            border_width=1,
-            border_color=BORDER,
-            wrap="word",
-        )
-        self.txt_transcription.grid(row=1, column=0, sticky="nsew")
-
-        ctk.CTkLabel(
-            ing_tab,
-            text="Wykryte skladniki z nagrania",
-            font=ctk.CTkFont(size=11),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w", pady=(6, 8))
-
-        self.ingredients_frame = ctk.CTkScrollableFrame(
-            ing_tab,
-            height=260,
-            fg_color=BG,
-            corner_radius=14,
-            border_width=1,
-            border_color=BORDER,
-            scrollbar_button_color=CARD_H,
-            scrollbar_button_hover_color=ACCENT_SOFT,
-        )
-        self.ingredients_frame.grid(row=1, column=0, sticky="nsew")
-
-        self.lbl_filter_info = ctk.CTkLabel(
-            ing_tab,
-            text="",
-            font=ctk.CTkFont(size=10),
-            text_color=MUTED,
-            justify="left",
-            anchor="w",
-            wraplength=260,
-        )
-        self.lbl_filter_info.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-
-        ctk.CTkLabel(
-            tr_tab,
-            text="Przetlumacz rozpoznany tekst na inny jezyk",
-            font=ctk.CTkFont(size=11),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w", pady=(6, 8))
-
-        tr_controls = ctk.CTkFrame(tr_tab, fg_color="transparent")
-        tr_controls.grid(row=1, column=0, sticky="ew")
-        tr_controls.grid_columnconfigure(0, weight=1)
-
-        self.combo_translate = ctk.CTkOptionMenu(
-            tr_controls,
-            values=["angielski", "niemiecki", "francuski", "hiszpanski"],
-            font=ctk.CTkFont(size=11),
-            fg_color=TAG_BG,
-            button_color=CARD_H,
-            button_hover_color=ACCENT_SOFT,
-            dropdown_fg_color=PANEL,
-            dropdown_hover_color=CARD_H,
-            text_color=TEXT,
-            dynamic_resizing=False,
-        )
-        self.combo_translate.grid(row=0, column=0, sticky="ew")
-
-        self.btn_translate = ctk.CTkButton(
-            tr_controls,
-            text="Tlumacz",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            height=34,
-            width=84,
-            corner_radius=12,
-            fg_color=ACCENT,
-            hover_color=ACCENT_H,
-            text_color=BG,
-            command=self._translate,
-        )
-        self.btn_translate.grid(row=0, column=1, padx=(8, 6))
-
-        self.btn_copy = ctk.CTkButton(
-            tr_controls,
-            text="Kopiuj",
-            font=ctk.CTkFont(size=10),
-            height=34,
-            width=70,
-            corner_radius=12,
-            fg_color="transparent",
-            hover_color=CARD_H,
-            text_color=TEXT2,
-            border_width=1,
-            border_color=BORDER,
-            command=self._copy_translation,
-        )
-        self.btn_copy.grid(row=0, column=2)
-
-        self.txt_translation = ctk.CTkTextbox(
-            tr_tab,
-            height=150,
-            font=ctk.CTkFont(size=11),
-            fg_color=BG,
-            text_color=MUTED,
-            corner_radius=14,
-            border_width=1,
-            border_color=BORDER,
-            wrap="word",
-        )
-        self.txt_translation.grid(row=2, column=0, pady=(10, 8), sticky="ew")
-        self.txt_translation.insert("1.0", "Transkrypcja pojawi sie tutaj po tlumaczeniu...")
-        self.txt_translation.configure(state="disabled")
-
-        self.btn_install_pkg = ctk.CTkButton(
-            tr_tab,
-            text="Pobierz pakiety tlumaczen",
-            font=ctk.CTkFont(size=10),
-            height=30,
-            corner_radius=12,
-            fg_color="transparent",
-            hover_color=CARD_H,
-            text_color=AMBER,
-            border_width=1,
-            border_color=AMBER,
-            command=self._install_translation_packages,
-        )
-        self.btn_install_pkg.grid(row=3, column=0, sticky="ew")
-        self.btn_install_pkg.grid_remove()
-
-    def _build_main(self):
-        self._main_frame = ctk.CTkFrame(
-            self,
-            fg_color=PANEL,
-            corner_radius=24,
-            border_width=1,
-            border_color=BORDER,
-        )
-        self._main_frame.grid(row=0, column=1, sticky="nsew", padx=(12, 20), pady=20)
-        self._main_frame.grid_rowconfigure(1, weight=1)
-        self._main_frame.grid_columnconfigure(0, weight=1)
-
-        hdr = ctk.CTkFrame(
-            self._main_frame,
-            fg_color=CARD,
-            corner_radius=20,
-            border_width=1,
-            border_color=BORDER,
-        )
-        hdr.grid(row=0, column=0, sticky="ew", padx=24, pady=(24, 0))
-        hdr.grid_columnconfigure(0, weight=1)
-
-        self.lbl_results_count = ctk.CTkLabel(
-            hdr,
-            text="Przepisy",
-            font=ctk.CTkFont(size=26, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        )
-        self.lbl_results_count.grid(row=0, column=0, sticky="w", padx=20, pady=(18, 2))
-
-        self.lbl_results_sub = ctk.CTkLabel(
-            hdr,
-            text="Nagraj glos lub wczytaj plik, aby wyszukac przepisy",
-            font=ctk.CTkFont(size=12),
-            text_color=MUTED,
-            anchor="w",
-        )
-        self.lbl_results_sub.grid(row=1, column=0, sticky="w", padx=20)
-
-        ctk.CTkLabel(
-            hdr,
-            text="Skladniki do wyszukania",
-            font=ctk.CTkFont(size=11),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=2, column=0, sticky="w", padx=20, pady=(16, 6))
-
-        self.query_frame = ctk.CTkFrame(hdr, fg_color="transparent")
-        self.query_frame.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
-        ctk.CTkLabel(
-            self.query_frame,
-            text="Czekam na skladniki z nagrania...",
-            font=ctk.CTkFont(size=11),
-            text_color=DIM,
-            anchor="w",
-        ).pack(anchor="w", padx=4, pady=2)
-
-        self.results_scroll = ctk.CTkScrollableFrame(
-            self._main_frame,
-            fg_color="transparent",
-            corner_radius=0,
-            scrollbar_button_color=CARD_H,
-            scrollbar_button_hover_color=ACCENT_SOFT,
-        )
-        self.results_scroll.grid(row=1, column=0, sticky="nsew", padx=28, pady=(16, 24))
-        self.results_scroll.grid_columnconfigure(0, weight=1)
-
-        self._empty_label = ctk.CTkLabel(
-            self.results_scroll,
-            text="Brak wynikow.\nDodaj nagranie, a tutaj pojawia sie dopasowane przepisy.",
-            font=ctk.CTkFont(size=14),
-            text_color=DIM,
-            justify="center",
-        )
-        self._empty_label.grid(row=0, column=0, pady=100)
-
-        self._overlay = ctk.CTkFrame(self._main_frame, fg_color=BG, corner_radius=0)
-        self._overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-        center = ctk.CTkFrame(
-            self._overlay,
-            fg_color=CARD,
-            corner_radius=20,
-            border_width=1,
-            border_color=BORDER,
-        )
-        center.place(relx=0.5, rely=0.42, anchor="center")
-
-        ctk.CTkLabel(
-            center,
-            text="Recipe Voice Filter",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=TEXT,
-        ).pack(padx=30, pady=(24, 6))
-
-        self.lbl_loading_step = ctk.CTkLabel(
-            center,
-            text="Inicjalizacja",
-            font=ctk.CTkFont(size=12), text_color=MUTED,
-        )
-        self.lbl_loading_step.pack(pady=(0, 16))
-
-        self.progress_bar = ctk.CTkProgressBar(
-            center,
-            width=240,
-            height=5,
-            mode="indeterminate",
-            progress_color=ACCENT, fg_color=CARD,
-        )
-        self.progress_bar.pack(padx=30, pady=(0, 24))
-        self.progress_bar.start()
 
     # ── Loading ──────────────────────────────────────────────────────────
 
@@ -1226,6 +1130,7 @@ class App(ctk.CTk):
 
             self._stop_dots()
             self._hide_overlay()
+            self.after(0, self._sync_vosk_buttons)
 
         threading.Thread(target=load, daemon=True).start()
 
@@ -1326,11 +1231,14 @@ class App(ctk.CTk):
         self.btn_record.configure(
             text="Nagraj", fg_color=ACCENT, hover_color=ACCENT_H
         )
-        self._set_status("Przetwarzanie mowy...", TEXT2)
-        self._show_processing_overlay("Przetwarzanie nagrania")
-        threading.Thread(
-            target=lambda: self._process_audio(self.recorder.stop()), daemon=True
-        ).start()
+        self._set_status("Przygotowanie nagrania...", TEXT2)
+        audio_hq = self.recorder.stop()  # 44100 Hz for quality playback
+        # Resample to 16 kHz for Whisper/Vosk
+        from scipy.signal import resample as sp_resample
+        audio_16k = sp_resample(audio_hq, int(len(audio_hq) * 16000 / RECORDING_SAMPLE_RATE)).astype(np.float32)
+        self._audio_buffer_hq = audio_hq
+        self._audio_hq_sr = RECORDING_SAMPLE_RATE
+        self._finalize_audio_buffer(audio_16k, {"source": "mic", "source_sr": RECORDING_SAMPLE_RATE})
 
     def _pulse(self):
         if not self.is_recording:
@@ -1354,26 +1262,448 @@ class App(ctk.CTk):
         threading.Thread(target=self._process_file, args=(path,), daemon=True).start()
 
     def _process_file(self, path):
-        import soundfile as sf
-        import numpy as np
         from scipy.signal import resample as sp_resample
 
-        audio, sr = sf.read(path, dtype="float32")
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        if sr != 16000:
-            audio = sp_resample(audio, int(len(audio) * 16000 / sr))
-        self._process_audio(audio)
-
-    def _process_audio(self, audio):
         try:
-            result = transcribe(audio, MODELS_DIR)
-            text = result["text"]
-            lang = result["language"]
-            lang_name = result["language_name"]
-            self.current_language = (str(lang).lower().strip() if lang else "pl")
-            self.after(0, lambda: self._update_transcription(text, lang_name))
+            audio, sr = sf.read(path, dtype="float32")
+            ch = int(audio.shape[1]) if audio.ndim > 1 else 1
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            src_sr = int(sr)
+            if src_sr != 16000:
+                audio = sp_resample(audio, int(len(audio) * 16000 / src_sr))
+            meta = {
+                "source": "file",
+                "path": path,
+                "source_sr": src_sr,
+                "channels": ch,
+            }
+        except Exception as exc:
+            self.after(0, lambda: self._set_status(f"Blad pliku: {exc}", RED))
+            self.after(0, self._hide_processing_overlay)
+            return
 
+        def handoff():
+            self._hide_processing_overlay()
+            self._finalize_audio_buffer(audio, meta)
+
+        self.after(0, handoff)
+
+    # ── Audio buffer + STT (Whisper / Vosk) ────────────────────────────────
+
+    def _finalize_audio_buffer(self, audio: np.ndarray, meta: dict):
+        audio = np.asarray(audio, dtype=np.float32).flatten()
+        if audio.size == 0:
+            self._set_status("Puste nagranie", AMBER)
+            return
+        if float(np.max(np.abs(audio))) > 1.0:
+            audio = audio / 32768.0
+
+        self._audio_buffer = audio
+        self._audio_meta = dict(meta)
+        self._text_whisper = ""
+        self._text_vosk = ""
+        self._text_hf_wv = ""
+        self._text_mms = ""
+        self._lang_whisper = None
+        self._lang_vosk = None
+        self._lang_hf_wv = None
+        self._lang_mms = None
+        self._detected_lang = None
+        if meta.get("source") != "mic":
+            self._audio_buffer_hq = None
+            self._audio_hq_sr = 16000
+
+        self.txt_stt.configure(state="normal")
+        self.txt_stt.delete("1.0", "end")
+
+        self._update_audio_meta_label()
+        self.btn_save_audio.configure(state="normal")
+        self.btn_play_audio.configure(state="normal")
+        # keep btn_stt disabled until language detection finishes
+        self.btn_stt.configure(state="disabled")
+        self._sync_vosk_buttons()
+        self.lbl_language.configure(text="wykrywanie...")
+        threading.Thread(target=self._detect_lang_worker, daemon=True).start()
+
+    def _update_audio_meta_label(self):
+        if self._audio_buffer is None:
+            self.lbl_audio_meta.configure(text="Brak nagrania")
+            return
+        dur = len(self._audio_buffer) / 16000.0
+        src = self._audio_meta.get("source", "")
+        extra = ""
+        if src == "file" and self._audio_meta.get("source_sr"):
+            o = int(self._audio_meta["source_sr"])
+            extra = f" | plik {o} Hz -> 16 kHz"
+        ch = self._audio_meta.get("channels", 1)
+        self.lbl_audio_meta.configure(
+            text=f"Dlugosc: {dur:.2f} s | 16 kHz | kanaly: {ch}{extra}",
+        )
+
+    def _sync_vosk_buttons(self):
+        hints: list[str] = []
+        if vosk_available(MODELS_DIR):
+            self.rb_vosk.configure(state="normal")
+        else:
+            self.rb_vosk.configure(state="disabled")
+            if self.stt_engine.get() == "vosk":
+                self.stt_engine.set("whisper")
+            hints.append("Vosk: brak modeli — uruchom setup.py")
+        hf_ok = hf_wav2vec_transformers_available() and mms_transformers_available()
+        if hf_ok:
+            self.rb_hf_wv.configure(state="normal")
+            self.rb_mms.configure(state="normal")
+        else:
+            self.rb_hf_wv.configure(state="disabled")
+            self.rb_mms.configure(state="disabled")
+            if self.stt_engine.get() in ("hf_wav2vec", "meta_mms"):
+                self.stt_engine.set("whisper")
+            hints.append("Hugging Face (Wav2Vec2 / MMS): pip install transformers")
+        if hints:
+            self.lbl_vosk_hint.configure(text=" · ".join(hints))
+            self.lbl_vosk_hint.grid()
+        else:
+            self.lbl_vosk_hint.grid_remove()
+
+    def _detect_lang_worker(self):
+        try:
+            code = detect_language_code(self._audio_buffer, MODELS_DIR)
+            name = LANG_NAMES.get(code, code)
+            self._detected_lang = code
+
+            def ok():
+                self.lbl_language.configure(text=f"{name} ({code})")
+                self.btn_stt.configure(state="normal")
+                self._sync_vosk_buttons()
+                # auto-transcribe with selected engine now that language is known
+                threading.Thread(target=self._thread_transcribe_active, daemon=True).start()
+
+            self.after(0, ok)
+        except Exception:
+            self._detected_lang = None
+
+            def err():
+                self.lbl_language.configure(text="nie wykryto")
+                self.btn_stt.configure(state="normal")
+
+            self.after(0, err)
+
+    @staticmethod
+    def _vosk_lang_from_detect(code: str | None) -> str | None:
+        if not code:
+            return None
+        c = str(code).lower().strip()
+        if c == "pl":
+            return "pl"
+        if c == "en":
+            return "en"
+        return None
+
+    def _save_audio_buffer(self):
+        if self._audio_buffer is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Zapisz nagranie",
+            defaultextension=".wav",
+            filetypes=[("WAV", "*.wav"), ("Wszystkie", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            buf = self._audio_buffer_hq if self._audio_buffer_hq is not None else self._audio_buffer
+            sr = self._audio_hq_sr if self._audio_buffer_hq is not None else 16000
+            sf.write(path, buf, sr, subtype="PCM_16")
+            self._set_status(f"Zapisano: {path}", GREEN)
+        except Exception as exc:
+            self._set_status(f"Blad zapisu: {exc}", RED)
+
+    def _play_audio_buffer(self):
+        if self._audio_buffer is None:
+            return
+
+        def play():
+            try:
+                self.after(0, lambda: self._set_status("Odtwarzanie...", TEXT2))
+                buf = self._audio_buffer_hq if self._audio_buffer_hq is not None else self._audio_buffer
+                sr = self._audio_hq_sr if self._audio_buffer_hq is not None else 16000
+                sd.play(buf.astype(np.float32), sr)
+                sd.wait()
+                self.after(0, lambda: self._set_status("Gotowy", TEXT2))
+            except Exception as exc:
+                self.after(0, lambda: self._set_status(f"Blad odtwarzania: {exc}", RED))
+
+        threading.Thread(target=play, daemon=True).start()
+
+    # ── Engine selection + auto-transcribe ────────────────────────────────
+
+    def _on_engine_change(self):
+        """Called when user switches STT engine radio.
+        Shows cached result if available; never auto-transcribes on switch."""
+        engine = self.stt_engine.get()
+        if engine == "whisper":
+            cached, lang = self._text_whisper, self._lang_whisper
+        elif engine == "vosk":
+            cached, lang = self._text_vosk, self._lang_vosk
+        elif engine == "hf_wav2vec":
+            cached, lang = self._text_hf_wv, self._lang_hf_wv
+        elif engine == "meta_mms":
+            cached, lang = self._text_mms, self._lang_mms
+        else:
+            cached, lang = self._text_whisper, self._lang_whisper
+        if cached:
+            self._update_stt_display(cached)
+            if lang:
+                self._apply_recipe_pipeline_from_text(cached, lang)
+        else:
+            # clear display — user needs to click Transkrybuj
+            self._update_stt_display("")
+
+    def _transcribe_action(self):
+        """Manual retranscribe (or first run) with current engine."""
+        if self._audio_buffer is None:
+            return
+        eng = self.stt_engine.get()
+        if eng == "whisper":
+            self._show_processing_overlay("Transkrypcja Whisper")
+            threading.Thread(target=self._thread_transcribe_whisper, daemon=True).start()
+        elif eng == "vosk":
+            self._transcribe_vosk_action()
+        elif eng == "hf_wav2vec":
+            self._transcribe_hf_wav2vec_action()
+        elif eng == "meta_mms":
+            self._transcribe_mms_action()
+
+    def _thread_transcribe_active(self):
+        """Background thread: transcribe with whichever engine is selected."""
+        engine = self.stt_engine.get()
+        try:
+            if engine == "whisper":
+                lang_hint = self._detected_lang
+                result = transcribe_whisper(self._audio_buffer, MODELS_DIR, language=lang_hint)
+                self.after(0, lambda r=result: self._on_whisper_done(r))
+            elif engine == "hf_wav2vec":
+                vk = self._vosk_lang_from_detect(self._detected_lang)
+                if vk and hf_wav2vec_transformers_available():
+                    result = transcribe_hf_wav2vec(self._audio_buffer, MODELS_DIR, vk)
+                    self.after(0, lambda r=result: self._on_hf_wav2vec_done(r))
+                elif vk and not hf_wav2vec_transformers_available():
+                    self.after(
+                        0,
+                        lambda: self._update_stt_display(
+                            "Brak pakietu transformers — pip install transformers"
+                        ),
+                    )
+                else:
+                    self.after(
+                        0,
+                        lambda: self._update_stt_display(
+                            "Wav2Vec2 HF: wykryty język nieobsługiwany (tylko PL/EN)"
+                        ),
+                    )
+            elif engine == "meta_mms":
+                vk = self._vosk_lang_from_detect(self._detected_lang)
+                if vk and mms_transformers_available():
+                    result = transcribe_mms(self._audio_buffer, MODELS_DIR, vk)
+                    self.after(0, lambda r=result: self._on_mms_done(r))
+                elif vk and not mms_transformers_available():
+                    self.after(
+                        0,
+                        lambda: self._update_stt_display(
+                            "Brak pakietu transformers — pip install transformers"
+                        ),
+                    )
+                else:
+                    self.after(
+                        0,
+                        lambda: self._update_stt_display(
+                            "Meta MMS: wykryty język nieobsługiwany (tylko PL/EN)"
+                        ),
+                    )
+            else:
+                vk = self._vosk_lang_from_detect(self._detected_lang)
+                if vk and vosk_available(MODELS_DIR):
+                    result = transcribe_vosk(self._audio_buffer, MODELS_DIR, vk)
+                    self.after(0, lambda r=result: self._on_vosk_done(r))
+                elif vk and not vosk_available(MODELS_DIR):
+                    self.after(0, lambda: self._update_stt_display("Brak modeli Vosk — uruchom setup.py"))
+                else:
+                    self.after(0, lambda: self._update_stt_display("Vosk: wykryty język nieobsługiwany (tylko PL/EN)"))
+        except Exception as exc:
+            self.after(0, lambda: self._stt_failed(exc))
+
+    def _update_stt_display(self, text: str):
+        """Update the single transcription textbox."""
+        self.txt_stt.configure(state="normal")
+        self.txt_stt.delete("1.0", "end")
+        self.txt_stt.insert("1.0", text)
+
+    def _transcribe_whisper_action(self):
+        if self._audio_buffer is None:
+            return
+        self._show_processing_overlay("Transkrypcja Whisper")
+        threading.Thread(target=self._thread_transcribe_whisper, daemon=True).start()
+
+    def _transcribe_hf_wav2vec_action(self):
+        if self._audio_buffer is None:
+            return
+        if not hf_wav2vec_transformers_available():
+            self._set_status("Brak pakietu transformers — pip install transformers", AMBER)
+            return
+        vk = self._vosk_lang_from_detect(self._detected_lang)
+        if vk is None:
+            self._update_stt_display("Wav2Vec2 HF: wykryty język nieobsługiwany (tylko PL/EN)")
+            self._set_status("Wav2Vec2 HF: nieobsługiwany język", AMBER)
+            return
+        self._show_processing_overlay("Transkrypcja Wav2Vec2 (HF)")
+        threading.Thread(
+            target=self._thread_transcribe_hf_wav2vec,
+            args=(vk,),
+            daemon=True,
+        ).start()
+
+    def _thread_transcribe_hf_wav2vec(self, vk: str):
+        try:
+            result = transcribe_hf_wav2vec(self._audio_buffer, MODELS_DIR, vk)
+            self.after(0, lambda r=result: self._on_hf_wav2vec_done(r))
+        except Exception as exc:
+            self.after(0, lambda: self._stt_failed(exc))
+        finally:
+            self.after(0, self._hide_processing_overlay)
+
+    def _transcribe_mms_action(self):
+        if self._audio_buffer is None:
+            return
+        if not mms_transformers_available():
+            self._set_status("Brak pakietu transformers — pip install transformers", AMBER)
+            return
+        vk = self._vosk_lang_from_detect(self._detected_lang)
+        if vk is None:
+            self._update_stt_display("Meta MMS: wykryty język nieobsługiwany (tylko PL/EN)")
+            self._set_status("Meta MMS: nieobsługiwany język", AMBER)
+            return
+        self._show_processing_overlay("Transkrypcja Meta MMS")
+        threading.Thread(
+            target=self._thread_transcribe_mms,
+            args=(vk,),
+            daemon=True,
+        ).start()
+
+    def _thread_transcribe_mms(self, vk: str):
+        try:
+            result = transcribe_mms(self._audio_buffer, MODELS_DIR, vk)
+            self.after(0, lambda r=result: self._on_mms_done(r))
+        except Exception as exc:
+            self.after(0, lambda: self._stt_failed(exc))
+        finally:
+            self.after(0, self._hide_processing_overlay)
+
+    def _thread_transcribe_whisper(self):
+        try:
+            lang_hint = self._detected_lang
+            result = transcribe_whisper(
+                self._audio_buffer,
+                MODELS_DIR,
+                language=lang_hint,
+            )
+            self.after(0, lambda r=result: self._on_whisper_done(r))
+        except Exception as exc:
+            self.after(0, lambda: self._stt_failed(exc))
+        finally:
+            self.after(0, self._hide_processing_overlay)
+
+    def _on_whisper_done(self, result: dict):
+        self._text_whisper = (result.get("text") or "").strip()
+        self._lang_whisper = (result.get("language") or self._detected_lang or "pl").lower()
+        if self.stt_engine.get() == "whisper":
+            self._update_stt_display(self._text_whisper)
+        self.lbl_language.configure(text=result.get("language_name", ""))
+        self._refresh_translation_support()
+        if self.stt_engine.get() == "whisper":
+            self._apply_recipe_pipeline_from_text(self._text_whisper, self._lang_whisper)
+        self._set_status("Transkrypcja Whisper gotowa", GREEN)
+
+    def _on_hf_wav2vec_done(self, result: dict):
+        text = (result.get("text") or "").strip()
+        lang = (result.get("language") or self._detected_lang or "pl").lower()
+        self._text_hf_wv = text
+        self._lang_hf_wv = lang
+        if self.stt_engine.get() == "hf_wav2vec":
+            self._update_stt_display(text)
+        self.lbl_language.configure(text=result.get("language_name", ""))
+        self._refresh_translation_support()
+        if self.stt_engine.get() == "hf_wav2vec":
+            self._apply_recipe_pipeline_from_text(text, lang)
+        self._set_status("Transkrypcja Wav2Vec2 (HF) gotowa", GREEN)
+
+    def _on_mms_done(self, result: dict):
+        text = (result.get("text") or "").strip()
+        lang = (result.get("language") or self._detected_lang or "pl").lower()
+        self._text_mms = text
+        self._lang_mms = lang
+        if self.stt_engine.get() == "meta_mms":
+            self._update_stt_display(text)
+        self.lbl_language.configure(text=result.get("language_name", ""))
+        self._refresh_translation_support()
+        if self.stt_engine.get() == "meta_mms":
+            self._apply_recipe_pipeline_from_text(text, lang)
+        self._set_status("Transkrypcja Meta MMS gotowa", GREEN)
+
+    def _transcribe_vosk_action(self):
+        if self._audio_buffer is None:
+            return
+        if not vosk_available(MODELS_DIR):
+            self._set_status("Brak modeli Vosk — uruchom setup.py", AMBER)
+            return
+        vk = self._vosk_lang_from_detect(self._detected_lang)
+        if vk is None:
+            msg = "Vosk: wykryty język nieobsługiwany (tylko PL/EN) — użyj Whisper."
+            self._update_stt_display(msg)
+            self._text_vosk = ""
+            self._lang_vosk = None
+            self._set_status("Vosk: nieobsługiwany język", AMBER)
+            return
+        self._show_processing_overlay("Transkrypcja Vosk")
+        threading.Thread(
+            target=self._thread_transcribe_vosk,
+            args=(vk,),
+            daemon=True,
+        ).start()
+
+    def _thread_transcribe_vosk(self, vk: str):
+        try:
+            result = transcribe_vosk(self._audio_buffer, MODELS_DIR, vk)
+            self.after(0, lambda r=result: self._on_vosk_done(r))
+        except Exception as exc:
+            self.after(0, lambda: self._stt_failed(exc))
+        finally:
+            self.after(0, self._hide_processing_overlay)
+
+    def _on_vosk_done(self, result: dict):
+        self._text_vosk = (result.get("text") or "").strip()
+        self._lang_vosk = (result.get("language") or "pl").lower()
+        if self.stt_engine.get() == "vosk":
+            self._update_stt_display(self._text_vosk)
+        self._refresh_translation_support()
+        if self.stt_engine.get() == "vosk":
+            self._apply_recipe_pipeline_from_text(self._text_vosk, self._lang_vosk)
+        self._set_status("Transkrypcja Vosk gotowa", GREEN)
+
+    def _set_vosk_placeholder(self, msg: str):
+        self._text_vosk = ""
+        self._lang_vosk = None
+        if self.stt_engine.get() == "vosk":
+            self._update_stt_display(msg)
+
+    def _stt_failed(self, exc: Exception):
+        self._set_status(f"Błąd STT: {exc}", RED)
+
+    def _apply_recipe_pipeline_from_text(self, text: str, lang_code: str):
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            self.current_language = (str(lang_code).lower().strip() if lang_code else "pl")
             raw = extract_ingredients(text, self.matcher.vocabulary)
             detected_ingredients = self._deduplicate_ingredients(raw)
             ingredients = self._cleanup_search_ingredients(detected_ingredients)
@@ -1384,22 +1714,25 @@ class App(ctk.CTk):
             ]
             self.detected_ingredients = detected_ingredients
             self.current_ingredients = ingredients
-            self.after(
-                0,
-                lambda: self._update_ingredients(
-                    detected_ingredients, ignored_ingredients
-                ),
-            )
+            self._update_ingredients(detected_ingredients, ignored_ingredients)
 
             results = self._search_recipes(ingredients)
             self.current_results = results
-            self.after(0, lambda: self._update_results(results))
+            self._update_results(results)
             self._set_status(f"Znaleziono {len(results)} przepisow", GREEN)
-
+            self._refresh_translation_support()
         except Exception as exc:
             self._set_status(f"Blad: {exc}", RED)
-        finally:
-            self._hide_processing_overlay()
+
+    def _transcription_text_for_translate(self) -> str:
+        e = self.stt_engine.get()
+        if e == "vosk":
+            return self._text_vosk.strip()
+        if e == "hf_wav2vec":
+            return self._text_hf_wv.strip()
+        if e == "meta_mms":
+            return self._text_mms.strip()
+        return self._text_whisper.strip()
 
     def _deduplicate_ingredients(self, ingredients: list) -> list:
         result = []
@@ -1407,6 +1740,50 @@ class App(ctk.CTk):
             if not any(tokens_match(ing, existing) for existing in result):
                 result.append(ing)
         return result
+
+    def _format_ignored_hint(self, ignored: list[str]) -> str:
+        if not ignored:
+            return ""
+        staples = [
+            i
+            for i in ignored
+            if any(tokens_match(i, s) for s in LOW_SIGNAL_INGREDIENTS)
+        ]
+        generic = [
+            i
+            for i in ignored
+            if any(tokens_match(i, g) for g in GENERIC_INGREDIENTS)
+        ]
+        rest = [i for i in ignored if i not in staples and i not in generic]
+        parts = []
+        if staples:
+            parts.append(
+                "bez wpływu na ranking (typowe dodatki): "
+                + ", ".join(staples)
+            )
+        if generic:
+            parts.append(
+                "zastąpione konkretnym składnikiem: " + ", ".join(generic)
+            )
+        if rest:
+            parts.append("pominięto: " + ", ".join(rest))
+        return " · ".join(parts)
+
+    def _staple_supplements_for_recipe(self, recipe_idx: int) -> list[str]:
+        if recipe_idx < 0:
+            return []
+        core = self.matcher.matched_ingredients(self.current_ingredients, recipe_idx)
+        out: list[str] = []
+        for ing in self.detected_ingredients:
+            if any(tokens_match(ing, c) for c in core):
+                continue
+            if not any(tokens_match(ing, s) for s in LOW_SIGNAL_INGREDIENTS):
+                continue
+            term = normalize_text(ing)
+            if term and self.matcher._ingredient_matches_recipe(term, recipe_idx):
+                if not any(tokens_match(ing, o) for o in out):
+                    out.append(ing)
+        return out
 
     def _cleanup_search_ingredients(self, ingredients: list) -> list:
         cleaned = self._deduplicate_ingredients(ingredients)
@@ -1428,7 +1805,7 @@ class App(ctk.CTk):
         return cleaned
 
     def _search_recipes(self, ingredients: list) -> list:
-        results = self.matcher.search(ingredients)
+        results = self.matcher.search(ingredients, top_n=50)
         results.sort(
             key=lambda recipe: (
                 self.matcher.match_count(ingredients, recipe.get("_idx", -1)),
@@ -1441,193 +1818,165 @@ class App(ctk.CTk):
 
     # ── UI updates ───────────────────────────────────────────────────────
 
-    def _update_transcription(self, text, lang_name):
-        self.txt_transcription.configure(state="normal")
-        self.txt_transcription.delete("1.0", "end")
-        self.txt_transcription.insert("1.0", text)
-        self.lbl_language.configure(text=lang_name)
-        self._refresh_translation_support()
-
     def _update_ingredients(self, ingredients, ignored_ingredients=None):
         for w in self.ingredients_frame.winfo_children():
             w.destroy()
         ignored_ingredients = ignored_ingredients or []
         if not ingredients:
-            ctk.CTkLabel(
-                self.ingredients_frame,
-                text="Brak wykrytych skladnikow",
-                font=ctk.CTkFont(size=11), text_color=MUTED,
-            ).pack(anchor="w", padx=8)
-            self.lbl_results_sub.configure(
-                text="Nagraj skladniki — tutaj pojawi sie dopasowanie.",
-            )
+            self.lbl_results_sub.configure(text="nagraj składniki — wyniki pojawią się tutaj")
             self.lbl_filter_info.configure(text="")
             return
-        _flow_layout_chips(
-            self.ingredients_frame,
-            ingredients,
-            ACCENT_SOFT,
-            TEXT,
-            font_size=11,
-            max_columns=3,
-        )
+        for ing in ingredients:
+            ctk.CTkLabel(
+                self.ingredients_frame, text=ing,
+                font=ctk.CTkFont(size=9),
+                fg_color=ACCENT_SOFT, text_color=ACCENT,
+                corner_radius=8,
+            ).pack(side="left", padx=(0, 4), pady=2)
         used = self.current_ingredients or ingredients
-        summary = ", ".join(used[:6])
-        if len(used) > 6:
-            summary += f" (+{len(used) - 6})"
-        self.lbl_results_sub.configure(text=f"Wyszukiwanie dla: {summary}")
-        if ignored_ingredients:
-            ignored_text = ", ".join(ignored_ingredients)
-            self.lbl_filter_info.configure(
-                text=f"Pominieto skladniki bazowe: {ignored_text}"
-            )
+        ignored_ingredients = ignored_ingredients or []
+        hint = self._format_ignored_hint(ignored_ingredients)
+        if hint:
+            self.lbl_filter_info.configure(text=hint)
         else:
             self.lbl_filter_info.configure(text="")
 
     def _update_results(self, results):
         for w in self.results_scroll.winfo_children():
             w.destroy()
+        self._recipe_canvas.yview_moveto(0)
 
         if not results:
             self.lbl_results_count.configure(text="Przepisy")
-            self.lbl_results_sub.configure(text="Nie znaleziono pasujacych przepisow")
+            self.lbl_results_sub.configure(text="Nie znaleziono pasujących przepisów")
             ctk.CTkLabel(
                 self.results_scroll,
-                text="Brak wynikow dla podanych skladnikow.\nSprobuj krotsze lub bardziej konkretne nagranie.",
-                font=ctk.CTkFont(size=13),
-                text_color=DIM,
-                justify="center",
-            ).grid(row=0, column=0, pady=80)
+                text="Brak wyników.\nSpróbuj innych składników.",
+                font=ctk.CTkFont(size=12), text_color=DIM, justify="center",
+            ).grid(row=0, column=0, pady=60)
             return
 
         total_asked = len(self.current_ingredients)
-        self.lbl_results_count.configure(text=f"{len(results)} przepisow")
+        self.lbl_results_count.configure(text=f"{len(results)} przepisów")
         if total_asked:
-            self.lbl_results_sub.configure(text=f"Posortowane wedlug trafnosci dla {total_asked} skladnikow")
+            self.lbl_results_sub.configure(text=f"posortowane wg trafności · {total_asked} skł.")
         else:
-            self.lbl_results_sub.configure(text="Posortowane wedlug trafnosci")
+            self.lbl_results_sub.configure(text="posortowane według trafności")
+        self.results_scroll.grid_columnconfigure(0, weight=1, uniform="rcol")
+        self.results_scroll.grid_columnconfigure(1, weight=1, uniform="rcol")
         for display_idx, recipe in enumerate(results):
             recipe_idx = recipe.get("_idx", -1)
             matched_count = self.matcher.match_count(self.current_ingredients, recipe_idx)
             self._add_card(display_idx, recipe, matched_count, total_asked)
 
     def _add_card(self, display_idx, recipe, matched_count, total_asked):
-        ings = self.matcher.preview_ingredients(recipe)
-        ing_count = len(ings) if isinstance(ings, list) else 0
+        recipe_idx = recipe.get("_idx", -1)
+        ing_count = len(self.matcher.preview_ingredients(recipe) or [])
 
-        card = ctk.CTkFrame(
-            self.results_scroll,
-            fg_color=CARD,
-            corner_radius=12,
-            border_width=1,
-            border_color=BORDER,
-        )
-        card.grid(row=display_idx, column=0, sticky="ew", pady=(0, 6))
+        grid_row = display_idx // 2
+        grid_col = display_idx % 2
+        pad_x = (0, 6) if grid_col == 0 else (6, 0)
+
+        # Score colours
+        if total_asked > 0 and matched_count == total_asked:
+            accent_bar, inner_bg = GREEN, "#f2fbf5"
+            chip_bg, chip_fg = "#c8eed9", MATCH_FULL
+        elif total_asked > 0 and matched_count > 0:
+            accent_bar, inner_bg = AMBER, "#fdf7e8"
+            chip_bg, chip_fg = "#f5e4b0", MATCH_PART
+        else:
+            accent_bar, inner_bg = BORDER, CARD
+            chip_bg, chip_fg = TAG_BG, TEXT2
+
+        card = ctk.CTkFrame(self.results_scroll, fg_color=inner_bg,
+                            corner_radius=14, border_width=1, border_color=BORDER)
+        card.grid(row=grid_row, column=grid_col, sticky="nsew",
+                  padx=pad_x, pady=(0, 10))
         card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(0, weight=1)
 
-        inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        inner = tk.Frame(card, bg=inner_bg)
+        inner.grid(row=0, column=0, sticky="ew", padx=20, pady=20)
         inner.grid_columnconfigure(0, weight=1)
 
-        title_row = ctk.CTkFrame(inner, fg_color="transparent")
+        # ── Title row + match badge ─────────────────────────────────────────
+        title_row = tk.Frame(inner, bg=inner_bg)
         title_row.grid(row=0, column=0, sticky="ew")
         title_row.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            title_row,
-            text=recipe.get("title", "Bez nazwy"),
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=TEXT,
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
+        title_text = recipe.get("title", "Bez nazwy")
+        tk.Label(title_row, text=title_text, bg=inner_bg, fg=TEXT,
+                 font=("Segoe UI", 18, "bold"),
+                 anchor="w", justify="left", wraplength=360,
+                 ).grid(row=0, column=0, sticky="ew")
 
-        if total_asked > 0:
-            score_text = f"{matched_count}/{total_asked}"
-            if matched_count == total_asked:
-                score_color = GREEN
-                score_bg = GREEN_SOFT
-            elif matched_count > 0:
-                score_color = AMBER
-                score_bg = AMBER_SOFT
-            else:
-                score_color = DIM
-                score_bg = TAG_BG
-        else:
-            score_text, score_color, score_bg = "", DIM, TAG_BG
+        # match badge top-right
+        if total_asked > 0 and matched_count > 0:
+            sym = "✓" if matched_count == total_asked else "~"
+            badge_text = f"{sym} {matched_count}/{total_asked}"
+            badge_bg = "#c8eed9" if matched_count == total_asked else "#f5e4b0"
+            badge_fg = MATCH_FULL if matched_count == total_asked else MATCH_PART
+            badge = tk.Frame(title_row, bg=badge_bg)
+            badge.grid(row=0, column=1, sticky="ne", padx=(10, 0))
+            tk.Label(badge, text=badge_text, bg=badge_bg, fg=badge_fg,
+                     font=("Segoe UI", 11, "bold"), padx=9, pady=4).pack()
 
-        if score_text:
-            score_badge = ctk.CTkFrame(
-                title_row,
-                fg_color=score_bg,
-                corner_radius=10,
-                border_width=1,
-                border_color=BORDER,
-            )
-            score_badge.grid(row=0, column=1, sticky="e", padx=(8, 0))
-            ctk.CTkLabel(
-                score_badge,
-                text=score_text,
-                font=ctk.CTkFont(size=10, weight="bold"),
-                text_color=score_color,
-            ).pack(padx=8, pady=3)
-
+        # ── Category ───────────────────────────────────────────────────────
         cat = (recipe.get("category") or "").strip()
-        meta = f"{cat} · {ing_count} skl." if cat else f"{ing_count} sklad."
-        ctk.CTkLabel(
-            inner,
-            text=meta,
-            font=ctk.CTkFont(size=10),
-            text_color=MUTED,
-            anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(2, 6))
+        if cat:
+            tk.Label(inner, text=cat, bg=inner_bg, fg=MUTED,
+                     font=("Segoe UI", 12), anchor="w",
+                     ).grid(row=1, column=0, sticky="w", pady=(5, 10))
 
-        if isinstance(ings, list) and ings:
-            chip_row = ctk.CTkFrame(inner, fg_color="transparent")
-            chip_row.grid(row=2, column=0, sticky="w")
-            for ing_text in ings[:3]:
-                chip = ctk.CTkFrame(
-                    chip_row,
-                    fg_color=TAG_BG,
-                    corner_radius=8,
-                    border_width=1,
-                    border_color=BORDER,
-                )
-                chip.pack(side="left", padx=(0, 4), pady=1)
-                ctk.CTkLabel(
-                    chip,
-                    text=str(ing_text)[:28] + ("…" if len(str(ing_text)) > 28 else ""),
-                    font=ctk.CTkFont(size=9),
-                    text_color=TEXT2,
-                ).pack(padx=6, pady=3)
-            if ing_count > 3:
-                ctk.CTkLabel(
-                    chip_row,
-                    text=f"+{ing_count-3}",
-                    font=ctk.CTkFont(size=10, weight="bold"),
-                    text_color=DIM,
-                ).pack(side="left", padx=2, pady=2)
+        # ── Matched ingredient pills ────────────────────────────────────────
+        if total_asked > 0 and matched_count > 0:
+            pills_src = self.matcher.matched_ingredients(self.current_ingredients, recipe_idx)
+        else:
+            pills_src = (self.matcher.preview_ingredients(recipe) or [])[:4]
 
-        def on_enter(_e, c=card):
-            c.configure(fg_color=CARD_H, border_color=ACCENT)
-
-        def on_leave(_e, c=card):
-            c.configure(fg_color=CARD, border_color=BORDER)
+        if pills_src:
+            chips_row = tk.Frame(inner, bg=inner_bg)
+            chips_row.grid(row=2, column=0, sticky="w")
+            shown = 0
+            for t in pills_src:
+                label = str(t)
+                label = label[:16] + "…" if len(label) > 16 else label
+                tk.Label(chips_row, text=label, bg=chip_bg, fg=chip_fg,
+                         font=("Segoe UI", 11), padx=9, pady=5,
+                         ).pack(side="left", padx=(0, 5), pady=2)
+                shown += 1
+                if shown >= 5:
+                    break
+            remaining = ing_count - shown
+            if remaining > 0:
+                tk.Label(chips_row, text=f"+{remaining}", bg=inner_bg, fg=DIM,
+                         font=("Segoe UI", 11)).pack(side="left", padx=(3, 0))
 
         def on_click(_e, r=recipe):
             self._show_detail(r)
 
-        def bind_rec(w):
-            w.bind("<Enter>", on_enter)
-            w.bind("<Leave>", on_leave)
-            w.bind("<Button-1>", on_click)
-            for ch in w.winfo_children():
-                bind_rec(ch)
+        def on_enter(_e):
+            card.configure(border_color=ACCENT)
+            self._bind_recipe_scroll()
+
+        def on_leave(_e):
+            card.configure(border_color=BORDER)
 
         try:
             card.configure(cursor="hand2")
         except Exception:
             pass
-        bind_rec(card)
+
+        all_w = [card, inner] + list(inner.winfo_children())
+        for w in all_w:
+            w.bind("<Button-1>", on_click)
+            w.bind("<Enter>", on_enter)
+            w.bind("<Leave>", on_leave)
+            w.bind("<MouseWheel>", self._on_recipe_scroll)
+        for child in inner.winfo_children():
+            for gc in child.winfo_children():
+                gc.bind("<Button-1>", on_click)
+                gc.bind("<MouseWheel>", self._on_recipe_scroll)
 
     def _show_detail(self, recipe):
         recipe_idx = recipe.get("_idx", -1)
@@ -1638,7 +1987,8 @@ class App(ctk.CTk):
         self._last_detail_open = (recipe_idx, now)
         matched = self.matcher.matched_ingredients(self.current_ingredients, recipe_idx)
         total_asked = len(self.current_ingredients)
-        DetailWindow(self, recipe, matched, total_asked)
+        supplement = self._staple_supplements_for_recipe(recipe_idx)
+        DetailWindow(self, recipe, matched, total_asked, matched_supplement=supplement)
 
     # ── Translation ──────────────────────────────────────────────────────
 
@@ -1664,7 +2014,7 @@ class App(ctk.CTk):
         return None
 
     def _translate(self):
-        text = self.txt_transcription.get("1.0", "end").strip()
+        text = self._transcription_text_for_translate()
         if not text:
             return
         configure_translation_packages(TRANSLATIONS_DIR)

@@ -61,7 +61,13 @@ def tokens_match(left: str, right: str) -> bool:
         return True
 
     prefix_len = len(os_common_prefix(left_stem, right_stem))
-    return prefix_len >= max(4, min(len(left_stem), len(right_stem)) - 1)
+    min_len = min(len(left_stem), len(right_stem))
+    len_diff = abs(len(left_stem) - len(right_stem))
+    # When words differ greatly in length (≥4 chars), require the prefix to cover
+    # the full shorter stem — prevents "ziemniak" matching "ziemniaczana" etc.
+    if len_diff >= 4:
+        return prefix_len >= min_len
+    return prefix_len >= max(4, min_len - 1)
 
 
 def os_common_prefix(left: str, right: str) -> str:

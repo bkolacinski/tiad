@@ -23,13 +23,26 @@ echo [1/4] Preparing local virtual environment...
 for %%D in ("%RELEASE_DIR%\RecipeVoiceFilter" "%WORK_DIR%" "%~dp0build" "%~dp0build_fast" "%~dp0build_cached" "%~dp0release_fast" "%~dp0release_cached" "%~dp0dist") do (
     if exist %%~fD powershell -NoProfile -Command "if (Test-Path '%%~fD') { Remove-Item -LiteralPath '%%~fD' -Recurse -Force -ErrorAction SilentlyContinue }"
 )
-if exist "%VENV_DIR%" powershell -NoProfile -Command "if (Test-Path '%VENV_DIR%') { Remove-Item -LiteralPath '%VENV_DIR%' -Recurse -Force -ErrorAction SilentlyContinue }"
-if not exist "%PYTHON_EXE%" (
-    python -m venv "%VENV_DIR%"
-    if errorlevel 1 (
-        echo ERROR: Failed to create virtual environment
-        exit /b 1
-    )
+:: Zawsze czysc stare venv (rd jest pewniejsze niz PowerShell przy polamanym folderze)
+if exist "%VENV_DIR%" (
+    echo   Usuwanie poprzedniego venv...
+    rd /s /q "%VENV_DIR%" 2>nul
+)
+:: Polamany venv: jest Scripts\python.exe ale brak pyvenv.cfg — wtedy rd wyzej tez czysci
+if exist "%VENV_DIR%" (
+    echo ERROR: Nie mozna usunac folderu venv: %VENV_DIR%
+    echo Zamknij procesy uzywajace tego folderu i sprobuj ponownie.
+    exit /b 1
+)
+echo   Tworzenie venv: %VENV_DIR%
+python -m venv "%VENV_DIR%"
+if errorlevel 1 (
+    echo ERROR: Failed to create virtual environment
+    exit /b 1
+)
+if not exist "%VENV_DIR%\pyvenv.cfg" (
+    echo ERROR: Brak pyvenv.cfg po utworzeniu venv — sprawdz instalacje Pythona.
+    exit /b 1
 )
 
 echo.
@@ -95,6 +108,9 @@ echo [4/4] Building EXE (this may take a few minutes)...
     --hidden-import "ctranslate2" ^
     --hidden-import "rapidfuzz" ^
     --hidden-import "certifi" ^
+    --hidden-import "vosk" ^
+    --hidden-import "transformers" ^
+    --hidden-import "transformers.models.wav2vec2" ^
     --collect-data "certifi" ^
     --collect-submodules "sklearn" ^
     --collect-submodules "scipy" ^
@@ -105,6 +121,8 @@ echo [4/4] Building EXE (this may take a few minutes)...
     --collect-all "argostranslate" ^
     --collect-all "ctranslate2" ^
     --collect-all "tiktoken_ext" ^
+    --collect-all "vosk" ^
+    --collect-all "transformers" ^
     --collect-data "spacy" ^
     app.py
 if errorlevel 1 (
@@ -114,7 +132,7 @@ if errorlevel 1 (
 
 echo.
 echo Cleaning temporary build directories...
-for %%D in ("%WORK_DIR%" "%~dp0build" "%~dp0build_fast" "%~dp0build_cached" "%~dp0release_fast" "%~dp0release_cached" "%~dp0dist" "%~dp0models" "%~dp0translation_packages" "%~dp0__pycache__" "%~dp0.venv") do (
+for %%D in ("%WORK_DIR%" "%~dp0build" "%~dp0build_fast" "%~dp0build_cached" "%~dp0release_fast" "%~dp0release_cached" "%~dp0dist" "%~dp0__pycache__" "%~dp0.venv") do (
     if exist %%~fD powershell -NoProfile -Command "if (Test-Path '%%~fD') { Remove-Item -LiteralPath '%%~fD' -Recurse -Force -ErrorAction SilentlyContinue }"
 )
 if exist "%VENV_DIR%" powershell -NoProfile -Command "if (Test-Path '%VENV_DIR%') { Remove-Item -LiteralPath '%VENV_DIR%' -Recurse -Force -ErrorAction SilentlyContinue }"

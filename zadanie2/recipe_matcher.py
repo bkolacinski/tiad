@@ -134,7 +134,7 @@ class RecipeMatcher:
 
             if self._load_cache():
                 if progress_callback:
-                    progress_callback("Wczytano gotowy indeks przepisów.")
+                    progress_callback("Loaded recipe index from cache.")
                 self._loaded = True
                 return len(self.recipes)
 
@@ -163,7 +163,7 @@ class RecipeMatcher:
                 return 0
 
             if progress_callback:
-                progress_callback(f"Indeksowanie {len(self.recipes)} przepisów...")
+                progress_callback(f"Indexing {len(self.recipes)} recipes...")
 
             self._build_index()
             self._save_cache()
@@ -171,8 +171,8 @@ class RecipeMatcher:
             return len(self.recipes)
 
     def _source_state(self) -> list[tuple[str, int]]:
-        """Stan zrodel JSON: (nazwa_pliku, rozmiar). Bez mtime — po spakowaniu do EXE
-        PyInstaller ustawia nowe znaczniki czasu i cache z buildu nigdy by nie pasowal."""
+        """JSON source fingerprint: (basename, size). Omits mtime — after PyInstaller
+        packaging, timestamps change and a build-time cache would never match."""
         files = sorted(glob.glob(os.path.join(self.data_dir, "recipes*.json")))
         state: list[tuple[str, int]] = []
         for filepath in files:
@@ -353,7 +353,8 @@ class RecipeMatcher:
             return False
         return True
 
-    def search(self, ingredients: list[str], mode: str = "any", top_n: int = 20) -> list[Dict]:
+    def search(self, ingredients: list[str], mode: str = "any", top_n: int = 50) -> list[Dict]:
+        """Search recipes by ingredient list (``any`` = TF-IDF ranking, ``all`` = strict mode)."""
         if not self._loaded or not self.recipes:
             return []
 
