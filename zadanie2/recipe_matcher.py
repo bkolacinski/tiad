@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import pickle
 import re
@@ -17,6 +18,14 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from text_utils import canonical_token, normalize_text, tokenize_words, tokens_match
+
+logger = logging.getLogger("zadanie2.matcher")
+
+# Minimum rapidfuzz ratio for treating two normalized ingredient tokens as
+# the same concept. 78 was picked empirically: matches "ziemniaki"/"ziemniak"
+# and "marchewka"/"marchewki", rejects "pomidor"/"ogórek". Tune together with
+# the same constant in ingredient_extractor.py.
+FUZZY_MIN_RATIO = 78
 
 _NLP = None
 _NLP_LOCK = threading.Lock()
@@ -200,8 +209,14 @@ class RecipeMatcher:
         try:
             with open(self.cache_path, "rb") as handle:
                 payload = pickle.load(handle)
+        except (OSError, EOFError, pickle.UnpicklingError, ValueError) as exc:
+            logger.info("Recipe cache invalid, will rebuild: %s", exc)
+            return False
+
+        try:
             current = sorted(self._source_state())
             if self._canonical_state_from_stored(payload.get("source_state")) != current:
+                logger.info("Recipe cache source fingerprint changed, rebuilding.")
                 return False
 
             self.recipes = payload["recipes"]
@@ -211,7 +226,8 @@ class RecipeMatcher:
             self._lemmatized = payload["lemmatized"]
             self._recipe_terms = payload["recipe_terms"]
             return True
-        except Exception:
+        except (KeyError, TypeError, AttributeError) as exc:
+            logger.info("Recipe cache payload missing fields, rebuilding: %s", exc)
             return False
 
     def _save_cache(self):
@@ -440,7 +456,7 @@ class RecipeMatcher:
         for recipe_term in recipe_terms:
             if tokens_match(ingredient, recipe_term):
                 return True
-            if fuzz.ratio(ingredient, recipe_term) >= 78:
+            if fuzz.ratio(ingredient, recipe_term) >= FUZZY_MIN_RATIO:
                 return True
         return False
 
@@ -456,7 +472,7 @@ class RecipeMatcher:
         for recipe_term in tokenize_words(recipe_text):
             if tokens_match(ingredient, recipe_term):
                 return True
-            if fuzz.ratio(normalize_text(ingredient), recipe_term) >= 78:
+            if fuzz.ratio(normalize_text(ingredient), recipe_term) >= FUZZY_MIN_RATIO:
                 return True
         return False
 

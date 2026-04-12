@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
 from pathlib import Path
+
+logger = logging.getLogger("zadanie2.translator")
 
 
 def _bootstrap_ssl_bundle_frozen() -> None:
@@ -23,8 +26,8 @@ def _bootstrap_ssl_bundle_frozen() -> None:
             ap = os.path.abspath(cand)
             if ap.startswith(root_abs):
                 ca = ap
-    except Exception:
-        pass
+    except (ImportError, OSError) as exc:
+        logger.info("certifi bundle lookup skipped: %s", exc)
     if (not ca or not os.path.isfile(ca)) and meipass:
         for dirpath, _, filenames in os.walk(meipass):
             if "cacert.pem" in filenames:
@@ -43,6 +46,12 @@ _bootstrap_ssl_bundle_frozen()
 _lock = threading.Lock()
 _configured_packages_dir: Path | None = None
 _ctranslate2_bootstrap_done = False
+
+# (text, source, target) -> translated text. Tłumaczenia okna szczegółów
+# powtarzają te same linie (tytuł, składniki, sekcje), więc cache daje
+# natychmiastowy zysk przy drugim otwarciu lub przełączeniu języka.
+_CACHE_LIMIT = 2048
+_translation_cache: dict[tuple[str, str, str], str] = {}
 
 SUPPORTED_LANGUAGES = [
     ("pl", "polski"),
@@ -90,8 +99,8 @@ def _bootstrap_ctranslate2_runtime() -> None:
             if os.path.isdir(p):
                 try:
                     os.add_dll_directory(p)
-                except (OSError, ValueError, AttributeError):
-                    pass
+                except (OSError, ValueError, AttributeError) as exc:
+                    logger.debug("add_dll_directory(%s) failed: %s", p, exc)
     _ctranslate2_bootstrap_done = True
 
 
@@ -111,13 +120,15 @@ def configure_translation_packages(base_dir: str | Path | None = None) -> Path:
 
         argos_settings.package_data_dir = package_dir
         argos_settings.package_dirs = [package_dir]
-    except Exception:
-        pass
+    except ImportError as exc:
+        logger.warning("argostranslate settings import failed: %s", exc)
+    except (OSError, AttributeError) as exc:
+        logger.warning("argostranslate settings configure failed: %s", exc)
     # Zaladuj DLL ctranslate2 w tym samym watku co GUI zanim worker wywoła Argos (Windows/EXE).
     try:
         import ctranslate2  # noqa: F401
-    except Exception:
-        pass
+    except ImportError as exc:
+        logger.info("ctranslate2 preimport skipped: %s", exc)
     return package_dir
 
 
@@ -155,6 +166,14 @@ def translate_text(text: str, source: str, target: str) -> str:
     if source not in SUPPORTED_CODES or target not in SUPPORTED_CODES:
         raise TranslationUnavailable(source, target)
 
+    if not text:
+        return ""
+
+    cache_key = (text, source, target)
+    cached = _translation_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     from argostranslate import translate as argtranslate
 
     try:
@@ -164,7 +183,20 @@ def translate_text(text: str, source: str, target: str) -> str:
         raise TranslationUnavailable(source, target, detail=str(exc)) from exc
     if out is None:
         raise TranslationUnavailable(source, target, detail="translate zwrocilo None")
-    return str(out).strip()
+    result = str(out).strip()
+
+    if len(_translation_cache) >= _CACHE_LIMIT:
+        # Prosty FIFO eviction — wystarcza dla jednego procesu.
+        try:
+            _translation_cache.pop(next(iter(_translation_cache)))
+        except StopIteration:
+            pass
+    _translation_cache[cache_key] = result
+    return result
+
+
+def clear_translation_cache() -> None:
+    _translation_cache.clear()
 
 
 class TranslationUnavailable(Exception):
@@ -218,5 +250,6 @@ def install_language_pair(source: str, target: str, progress_callback=None) -> b
                 installed_any = True
 
             return installed_any
-        except Exception:
+        except Exception as exc:
+            logger.warning("install_language_pair %s->%s failed: %s", source, target, exc)
             return False

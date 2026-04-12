@@ -119,6 +119,22 @@ def transcribe(audio: np.ndarray, model_dir: str = None) -> dict:
     return transcribe_whisper(audio, model_dir, language=None)
 
 
+class AudioDeviceError(RuntimeError):
+    """Raised when no usable audio input device is available."""
+
+
+def audio_input_available() -> bool:
+    """Return True if at least one audio input device with a working default exists."""
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return False
+    for dev in devices:
+        if dev.get("max_input_channels", 0) > 0:
+            return True
+    return False
+
+
 class AudioRecorder:
     """Records audio from microphone in a background thread."""
 
@@ -130,14 +146,25 @@ class AudioRecorder:
 
     def start(self):
         self._frames = []
+        try:
+            self._stream = sd.InputStream(
+                samplerate=RECORDING_SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="float32",
+                callback=self._callback,
+            )
+            self._stream.start()
+        except sd.PortAudioError as exc:
+            self._stream = None
+            raise AudioDeviceError(
+                f"Nie można otworzyć mikrofonu: {exc}"
+            ) from exc
+        except Exception as exc:
+            self._stream = None
+            raise AudioDeviceError(
+                f"Błąd wejścia audio: {exc}"
+            ) from exc
         self._recording = True
-        self._stream = sd.InputStream(
-            samplerate=RECORDING_SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            callback=self._callback,
-        )
-        self._stream.start()
 
     def _callback(self, indata, frames, time, status):
         if self._recording:
@@ -148,8 +175,13 @@ class AudioRecorder:
         """Return raw audio at RECORDING_SAMPLE_RATE. Caller must resample for STT."""
         self._recording = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            finally:
+                self._stream = None
         with self._lock:
             if self._frames:
                 return np.concatenate(self._frames, axis=0).flatten()
