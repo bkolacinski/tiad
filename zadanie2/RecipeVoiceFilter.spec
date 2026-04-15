@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('data', 'data'), ('models', 'models'), ('translation_packages', 'translation_packages')]
 binaries = []
-hiddenimports = ['whisper', 'whisper.audio', 'sklearn.feature_extraction.text', 'sklearn.metrics.pairwise', 'spacy', 'pl_core_news_sm', 'customtkinter', 'sounddevice', 'soundfile', 'argostranslate', 'ctranslate2', 'transformers', 'transformers.models.wav2vec2', 'rapidfuzz', 'certifi', 'vosk']
+hiddenimports = ['whisper', 'whisper.audio', 'sklearn.feature_extraction.text', 'sklearn.metrics.pairwise', 'spacy', 'pl_core_news_sm', 'customtkinter', 'sounddevice', 'soundfile', 'argostranslate', 'ctranslate2', 'rapidfuzz', 'certifi', 'vosk', 'transformers', 'transformers.models.wav2vec2']
 datas += collect_data_files('certifi')
 datas += collect_data_files('spacy')
 hiddenimports += collect_submodules('sklearn')
@@ -21,11 +21,11 @@ tmp_ret = collect_all('argostranslate')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('ctranslate2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('transformers')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tiktoken_ext')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('vosk')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('transformers')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 

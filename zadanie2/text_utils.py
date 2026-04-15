@@ -19,6 +19,9 @@ COMMON_POLISH_SUFFIXES = (
     "ach",
     "ów",
     "om",
+    "em",
+    "ie",
+    "u",
 )
 
 
