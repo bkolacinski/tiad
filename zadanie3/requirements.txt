@@ -1,0 +1,9 @@
+tensorflow[and-cuda]>=2.19
+marimo
+kaggle
+scikit-learn
+matplotlib
+seaborn
+numpy
+pandas
+pillow
