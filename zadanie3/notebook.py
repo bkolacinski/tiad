@@ -24,6 +24,21 @@ def _(mo):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 1. Setup środowiska
+
+        Konfigurujemy TensorFlow do pracy z GPU:
+        - dodajemy ścieżki bibliotek CUDA (z pip wheels `nvidia-*`) do `LD_LIBRARY_PATH`
+        - `set_memory_growth(True)` — VRAM przydzielany na żądanie zamiast rezerwowania całości na starcie
+        - wyciszamy logi TF (`TF_CPP_MIN_LOG_LEVEL=2`)
+        """
+    )
+    return
+
+
+@app.cell
 def _():
     import os
     import site
@@ -47,6 +62,25 @@ def _():
 
     print(f"TF {tf.__version__}  |  GPU: {gpus}")
     return gpus, np, pd, tf
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 2. Hiperparametry i konfiguracja
+
+        - `IMAGE_SIZE = (224, 224)` — wejście oczekiwane przez wszystkie 5 architektur (tak były trenowane na ImageNet)
+        - `BATCH_SIZE = 32` — dobry kompromis między prędkością treningu a zużyciem VRAM
+        - **Faza 1**: 8 epok, lr=1e-3 (trening tylko głowy)
+        - **Faza 2**: 12 epok, lr=1e-5 (fine-tuning, 100× mniejszy lr)
+        - `UNFREEZE_FRACTION = 1/3` — odmrażamy górną 1/3 backbone'u w fazie 2
+        - `EARLY_STOP_PATIENCE = 5` — przerwij gdy val_loss nie spada przez 5 epok
+        - `SPLITS` — 5 proporcji train/test do porównania
+        - `MODEL_NAMES` — 5 architektur do porównania → 25 eksperymentów łącznie
+        """
+    )
+    return
 
 
 @app.cell
@@ -98,6 +132,28 @@ def _(DATA_DIR, MODELS_DIR, RESULTS_DIR):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 3. Wczytanie danych
+
+        `cards.csv` zawiera kolumny:
+        - `filepaths` — ścieżka względna do JPG
+        - `labels` — pełna nazwa karty z kolorem (np. `"ace of spades"`) — **53 unikalne wartości**
+        - `card type` — sam typ bez koloru (np. `"ace"`) — **14 unikalnych wartości**
+        - `data set` — oryginalny podział train/valid/test (ignorujemy, robimy własny)
+
+        **Używamy kolumny `card type`** → klasyfikacja 14-klasowa: ace, 2–10, jack, queen, king, joker.
+        Wcześniejsze eksperymenty na 53 klasach dawały tylko 60–72% accuracy ze względu na małą liczbę
+        próbek per klasa (~150). Po agregacji do 14 klas mamy ~580 obrazów per klasa.
+
+        Filtrujemy wiersze, których plik nie istnieje (zabezpieczenie przed częściowym pobraniem datasetu).
+        """
+    )
+    return
+
+
+@app.cell
 def _(DATA_DIR, pd):
     import os as _os
     df = pd.read_csv(f"{DATA_DIR}/cards.csv")
@@ -120,6 +176,23 @@ def _(df, mo):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 4. Stratified split
+
+        `train_test_split(..., stratify=labels)` zachowuje proporcje klas w obu częściach.
+        Bez `stratify` losowy podział mógłby przypadkowo wrzucić wszystkie obrazy rzadkiej klasy
+        do jednego zbioru, co uniemożliwiłoby trening lub ocenę.
+
+        `random_state=42` gwarantuje powtarzalność — ten sam split przy każdym uruchomieniu,
+        więc porównanie modeli jest fair (każdy model widzi te same dane treningowe i testowe).
+        """
+    )
+    return
+
+
+@app.cell
 def _(SEED, df, np):
     from sklearn.model_selection import train_test_split
 
@@ -136,6 +209,29 @@ def _(SEED, df, np):
         return train_paths, train_labels, test_paths, test_labels
 
     return (make_split,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 5. Pipeline danych (tf.data) + augmentacja
+
+        `tf.data.Dataset` to leniwy potok danych — ładuje i przetwarza obrazy w tle podczas gdy GPU trenuje.
+        Kolejność operacji:
+
+        1. **shuffle** (tylko train) — losowa kolejność próbek, żeby batche nie były posortowane po klasie
+        2. **decode** — wczytanie JPG z dysku, dekodowanie do tensora `[H, W, 3]`, resize do 224×224
+        3. **batch(32)** — grupowanie po 32 obrazy → tensor `[32, 224, 224, 3]`
+        4. **augment** (tylko train) — losowe rotacje, zoom, translacja, jasność, kontrast
+        5. **preprocess_fn** — normalizacja specyficzna dla architektury (ResNet odejmuje średnią ImageNet, MobileNet skaluje do [-1,1] itd.)
+        6. **prefetch** — przygotowuje następny batch gdy GPU trenuje na obecnym → GPU nigdy nie czeka
+
+        **Brak RandomFlip** — karta to obiekt o stałej orientacji (figury asymetryczne).
+        **Augmentacja przed `preprocess_fn`** — augmentacja oczekuje pikseli [0, 255], a preprocess je przeskalowuje.
+        """
+    )
+    return
 
 
 @app.cell
@@ -175,6 +271,42 @@ def _(BATCH_SIZE, IMAGE_SIZE, NUM_CLASSES, tf):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        r"""
+        ## 6. Definicja modelu (backbone + head)
+
+        Każdy z 5 modeli ma tę samą strukturę:
+
+        ```
+        Input [224, 224, 3]
+              ↓
+        Backbone (ImageNet weights, frozen)   ← np. ResNet50, MobileNetV2, ...
+              ↓ pooling="avg" (GlobalAveragePooling2D)
+        Wektor cech [C]                        ← C = 512..2048 zależnie od architektury
+              ↓
+        Dropout(0.5)                           ← regularizacja
+              ↓
+        Dense(14, softmax)                     ← własna głowa: 14 klas kart
+              ↓
+        Prawdopodobieństwa [14]
+        ```
+
+        **`include_top=False`** — odcinamy oryginalną głowę 1000-klasową ImageNet.
+        **`pooling="avg"`** — dodaje GlobalAveragePooling2D na końcu backbone'u: spłaszcza mapy
+        cech `[7, 7, C]` → wektor `[C]` przez uśrednienie każdej z C map.
+
+        **`backbone(inputs, training=False)`** — kluczowe! BatchNormalization w trybie inference
+        używa zapisanych statystyk z ImageNet zamiast liczyć je z naszych mini-batchy 32 kart
+        (które zaburzyłyby statystyki).
+
+        **Faza 1 kompilacja**: Adam lr=1e-3, sparse_categorical_crossentropy (etykiety jako int, nie one-hot).
+        """
+    )
+    return
+
+
+@app.cell
 def _(IMAGE_SIZE, NUM_CLASSES, tf):
     from tensorflow.keras import applications as apps
 
@@ -211,6 +343,34 @@ def _(IMAGE_SIZE, NUM_CLASSES, tf):
         return model, preprocess
 
     return MODEL_REGISTRY, build_model
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 7. Dwufazowy trening
+
+        **Faza 1 — tylko głowa (8 epok, lr=1e-3):**
+        Backbone zamrożony. Trenujemy ~tysiące parametrów głowy. Szybko i stabilnie — głowa
+        z losowych wag dostosowuje się do domeny kart.
+
+        **Faza 2 — fine-tuning (12 epok, lr=1e-5):**
+        Odmrażamy górną 1/3 warstw backbone'u. Dolne 2/3 zostają zamrożone (krawędzie/tekstury
+        są uniwersalne). Wszystkie warstwy `BatchNormalization` zostają zamrożone — ich statystyki
+        z ImageNet zostałyby zniekształcone przez małe batche.
+
+        **Dlaczego 100× mniejszy lr?** W fazie 2 modyfikujemy wagi, które już są dobre.
+        Duży lr by je zniszczył. Reguła: fine-tuning używa lr 100× mniejszego niż trening od zera.
+
+        **EarlyStopping** — monitor=val_loss, patience=5, restore_best_weights=True.
+        Jeśli val_loss nie spada przez 5 epok → przerwij i przywróć wagi z najlepszej epoki
+        (nie ostatniej!). Zabezpieczenie przed przeuczeniem.
+
+        Historia obu faz jest scalana przed zapisem (helper `_merge_history`).
+        """
+    )
+    return
 
 
 @app.cell
@@ -273,6 +433,32 @@ def _(
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 8. Ewaluacja — obliczanie metryk
+
+        Dla każdego modelu po treningu:
+
+        1. `model.predict(test_ds)` → macierz prawdopodobieństw `y_prob` o kształcie `[N, 14]`
+        2. `y_pred = y_prob.argmax(axis=1)` → klasa z najwyższym prawdopodobieństwem
+        3. `confusion_matrix` — tablica 14×14: `CM[i][j]` = ile obrazów klasy `i` zostało zaklasyfikowanych jako `j`
+        4. `classification_report` — accuracy, precision, recall, F1 per klasa + macro avg
+        5. `roc_auc_score` w wariancie one-vs-rest (każda klasa vs reszta), agregacja macro i micro
+
+        **Macro average** — średnia metryki po klasach z równą wagą (każda klasa liczy się tak samo).
+        **Micro average** — agregacja TP/FP/FN po wszystkich klasach przed liczeniem metryki.
+        Dla zbalansowanego datasetu macro ≈ micro.
+
+        **AUC w wariancie OvR (one-vs-rest):** dla każdej z 14 klas robimy binarne pytanie
+        "to jest klasa c czy nie?", liczymy AUC, uśredniamy. AUC jest niezależne od progu
+        decyzyjnego — mówi jak dobrze model szereguje próbki, niezależnie od `argmax`.
+        """
+    )
+    return
+
+
+@app.cell
 def _(NUM_CLASSES, np, tf):
     from sklearn.metrics import (
         confusion_matrix,
@@ -312,6 +498,39 @@ def _(NUM_CLASSES, np, tf):
         }
 
     return (evaluate,)
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 9. Główna pętla — 25 eksperymentów
+
+        Dla każdej kombinacji `(model, split)` z **5 modeli × 5 splitów = 25 runów**:
+
+        1. Stratified split danych
+        2. Trening dwufazowy (faza 1 + faza 2)
+        3. Ewaluacja na zbiorze testowym
+        4. Zapis wyników do plików:
+           - `results/metrics.csv` — wiersz z metrykami
+           - `results/cm/<tag>.npy` — macierz pomyłek
+           - `results/probs/<tag>_y_true.npy` i `_y_prob.npy` — surowe predykcje (do późniejszej analizy ROC)
+           - `results/history/<tag>.json` — krzywe loss/accuracy per epoka
+
+        **Resume support** — przed każdym eksperymentem sprawdzamy czy `(model, split)` już jest
+        w CSV. Jeśli tak — pomijamy. Można przerwać Ctrl+C i wznowić bez utraty wyników.
+
+        **Zarządzanie VRAM** — po każdym runie:
+        - `del model, history, test_ds`
+        - `tf.keras.backend.clear_session()` — czyści graf TF
+        - `gc.collect()` — Python garbage collection
+
+        Bez tego po 3–4 modelach VRAM się zapełnia i kolejny model crashuje (OOM).
+
+        Czas: ~60–90 min na RTX 5080 dla pełnego runu.
+        """
+    )
+    return
 
 
 @app.cell
@@ -384,6 +603,18 @@ def _(metrics_df, mo):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        Tabela z wszystkimi 25 eksperymentami, posortowana po modelu i splicie.
+        Kolumny: accuracy, macro F1/precision/recall, AUC macro, liczba faktycznie wykonanych
+        epok (EarlyStopping mógł skrócić), czas treningu w sekundach.
+        """
+    )
+    return
+
+
+@app.cell
 def _(metrics_df):
     summary = metrics_df.copy()
     summary = summary[["model", "split", "accuracy", "macro_f1", "macro_precision",
@@ -410,6 +641,24 @@ def _(pivot_acc, pivot_auc, pivot_f1):
     print(pivot_f1.round(4))
     print("\nAUC MACRO")
     print(pivot_auc.round(4))
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 10. Wykres metryk vs split
+
+        Trzy panele obok siebie: Accuracy, Macro F1, Macro AUC. Na każdym 5 linii — jedna na model.
+        Oś X = proporcja zbioru treningowego (0.5 → 0.9). Pozwala zobaczyć:
+        - jak każdy model skaluje się z ilością danych
+        - który model jest najlepszy globalnie
+        - czy więcej danych zawsze pomaga (zwykle tak, ale czasem plateau)
+
+        Zapis do `results/metrics_vs_split.png`.
+        """
+    )
     return
 
 
@@ -441,6 +690,22 @@ def _(RESULTS_DIR, metrics_df):
 
 
 @app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 11. Macierz pomyłek najlepszego modelu
+
+        Wybieramy run o najwyższym accuracy i rysujemy heatmapę 14×14.
+        - Diagonala (jasne) = poprawne klasyfikacje
+        - Poza diagonalą = pomyłki — pokazują które klasy są ze sobą mylone
+
+        Spodziewamy się dużych pomyłek między **6 a 9** (po obrocie 180° wyglądają identycznie).
+        """
+    )
+    return
+
+
+@app.cell
 def _(RESULTS_DIR, class_names, cm_dir, metrics_df, np, plt):
     import os as _os
     import seaborn as sns
@@ -463,6 +728,26 @@ def _(RESULTS_DIR, class_names, cm_dir, metrics_df, np, plt):
     plt.show()
     print(f"best: {best['model']} @ split {best['split']:.2f}  acc={best['accuracy']:.4f}")
     return ax_cm, best, best_tag, cm_best, fig_cm, out_cm, sns
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 12. Krzywe ROC najlepszego modelu
+
+        Dla każdej z 14 klas liczymy AUC w wariancie one-vs-rest.
+        Sortujemy klasy po AUC i rysujemy **5 najgorszych + 5 najlepszych** (10 krzywych).
+        Rysowanie wszystkich 14 byłoby nieczytelne.
+
+        - Krzywa losowego klasyfikatora = linia ukośna (AUC=0.5)
+        - Krzywa idealna = punkt (0, 1) → AUC=1.0
+        - Praktyczne wyniki: AUC > 0.95 oznaczają model wysokiej jakości
+
+        Zapis do `results/roc_<best>.png`.
+        """
+    )
+    return
 
 
 @app.cell
@@ -502,6 +787,27 @@ def _(NUM_CLASSES, RESULTS_DIR, best, best_tag, class_names, np, plt, prob_dir):
     plt.show()
     print(f"saved {out_roc}")
     return ax_roc, fig_roc, out_roc, per_class_auc, y_prob, y_true
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
+        ## 13. Krzywe uczenia (loss + accuracy)
+
+        Siatka 5×2 (5 modeli × 2 metryki: loss i accuracy). W każdym panelu po 5 par krzywych
+        (train + val) — jedna para na każdy split.
+
+        Pozwala zobaczyć:
+        - czy model się przeucza (val_loss rośnie gdy train_loss spada)
+        - kiedy zadziałał EarlyStopping (krzywa się urywa)
+        - gap między train i val (duży = przeuczenie, mały = dobra generalizacja)
+        - moment przejścia faza 1 → faza 2 (zwykle widoczny "skok" jakości)
+
+        Zapis do `results/learning_curves.png`.
+        """
+    )
+    return
 
 
 @app.cell
