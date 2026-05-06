@@ -8,8 +8,10 @@
 \usepackage{array}
 \usepackage{hyperref}
 \usepackage[section]{placeins}
-
-\setlength{\textheight}{22cm}
+\usepackage{float}
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=3.5cm, right=3.5cm]{geometry}
+\setlength{\emergencystretch}{2em}
+\usepackage[protrusion=true,expansion=false]{microtype}
 
 \title{{\bf Zadanie nr 3 -- Klasyfikacja obrazów kart do gry\\przy użyciu konwolucyjnych sieci neuronowych}\linebreak
 Techniki Inteligentnej Analizy Danych}
@@ -192,7 +194,9 @@ Najlepszy wynik osiągnęła architektura {\bf VGG16} przy podziale 90/10 z accu
 
 \subsection{Wyniki -- macro F1}
 
-\begin{table}[h!]
+Wartości macro F1 dla wszystkich 25 eksperymentów zebrane są w Tab.~\ref{tab:f1}.
+
+\begin{table}[H]
   \caption{Macro F1 modeli przy różnych podziałach train/test}
   \centering
   \vspace{0.2cm}
@@ -213,7 +217,9 @@ Najlepszy wynik osiągnęła architektura {\bf VGG16} przy podziale 90/10 z accu
 
 \subsection{Wyniki -- AUC \textit{macro}}
 
-\begin{table}[h!]
+Wartości AUC \textit{macro} (one-vs-rest) dla wszystkich 25 eksperymentów zebrane są w Tab.~\ref{tab:auc}.
+
+\begin{table}[H]
   \caption{AUC \textit{macro} (one-vs-rest) modeli przy różnych podziałach train/test}
   \centering
   \vspace{0.2cm}

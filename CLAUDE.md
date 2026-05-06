@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Structure
 
-Two independent university assignments, each a standalone Python desktop app with its own virtual environment and build scripts:
+Three independent university assignments:
 
 - `zadanie1/` — XLSX-to-DOCX/PDF converter (tkinter GUI)
-- `zadanie2/` — Recipe Voice Filter (main project, CustomTkinter GUI)
+- `zadanie2/` — Recipe Voice Filter (CustomTkinter GUI)
+- `zadanie3/` — CNN image classification (marimo notebook, TensorFlow/Keras)
 
 ## zadanie2 — Recipe Voice Filter
 
@@ -51,3 +52,46 @@ The app processes: **audio → transcription → ingredient extraction → recip
 ### Language Pairs (translator.py)
 
 Polish ↔ English ↔ German/French/Spanish. Multi-hop translation goes through English as pivot.
+
+## zadanie3 — CNN Image Classification
+
+### Development Commands
+
+```bash
+# Create venv and install deps
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+
+# Download dataset (requires ~/.kaggle/kaggle.json or access_token)
+kaggle datasets download -d gpiosenka/cards-image-datasetclassification -p data/ --unzip
+
+# Run full training pipeline (5 models × 5 splits = 25 experiments, ~70-90 min on RTX 5080)
+python notebook.py
+
+# Interactive notebook
+marimo edit notebook.py
+```
+
+### Architecture
+
+Pipeline: dataset CSV → stratified train/test split → TF Dataset (decode + augment + preprocess) → two-phase transfer learning → metrics + plots saved to `results/`.
+
+| Component | Details |
+|---|---|
+| `notebook.py` | Single marimo `.py` file — all cells from data loading to final plots |
+| Models | MobileNetV2, ResNet50, EfficientNetB0, InceptionV3, VGG16 (weights=imagenet) |
+| Head | GlobalAveragePooling2D → Dropout(0.5) → Dense(NUM_CLASSES, softmax) |
+| Phase 1 | Frozen backbone, Adam lr=1e-3, up to 8 epochs |
+| Phase 2 | Top 1/3 backbone unfrozen (BN kept frozen), Adam lr=1e-5, up to 12 epochs |
+| Splits | 50/50, 60/40, 70/30, 80/20, 90/10 |
+
+### Key Design Constraints
+
+- **Dataset**: Cards Image Dataset (Kaggle, gpiosenka) — 8154 images, 224×224 RGB, **14 card types** (ace, 2–10, jack, queen, king, joker; suit-independent grouping), ~580 images/class.
+- **Fully offline after setup**: dataset in `data/`, saved weights in `models/` — both gitignored.
+- **Resume support**: training loop checks `results/metrics.csv` and skips already-completed (model, split) pairs.
+- **GPU**: RTX 5080 (Blackwell sm_120, 16 GB VRAM), CUDA 12.x, cuDNN 9.x, WSL2 Ubuntu 22.04.
+- **VRAM management**: `set_memory_growth(True)` + `tf.keras.backend.clear_session()` + `gc.collect()` after each experiment.
+- **BN frozen during fine-tuning**: BatchNorm layers stay in inference mode (ImageNet running stats) to avoid corruption from small batches.
+- **Augmentation order**: augmentation runs before `preprocess_input` (which rescales/shifts pixels).
+- **No horizontal flip**: cards are orientation-dependent.

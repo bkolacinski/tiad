@@ -16,8 +16,8 @@ def _(mo):
         """
         # Zadanie 3 — Klasyfikacja obrazów (Cards Image Dataset)
 
-        Porównanie 5 modeli CNN (transfer learning z ImageNet) na 53 klasach kart,
-        dla 4 podziałów train/test. Metryki: accuracy, precision, recall, F1, ROC/AUC.
+        Porównanie 5 modeli CNN (transfer learning z ImageNet) na 14 typach kart,
+        dla 5 podziałów train/test. Metryki: accuracy, precision, recall, F1, ROC/AUC.
         """
     )
     return
@@ -29,6 +29,7 @@ def _():
     import site
     import glob
 
+    # nvidia-* pip wheels install CUDA .so files here; TF needs them on LD_LIBRARY_PATH
     nvidia_paths = glob.glob(os.path.join(site.getsitepackages()[0], "nvidia", "*", "lib"))
     if nvidia_paths:
         os.environ["LD_LIBRARY_PATH"] = ":".join(nvidia_paths) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
@@ -41,6 +42,7 @@ def _():
 
     gpus = tf.config.list_physical_devices("GPU")
     for _g in gpus:
+        # allocate VRAM on demand instead of reserving everything upfront
         tf.config.experimental.set_memory_growth(_g, True)
 
     print(f"TF {tf.__version__}  |  GPU: {gpus}")
@@ -100,6 +102,7 @@ def _(DATA_DIR, pd):
     import os as _os
     df = pd.read_csv(f"{DATA_DIR}/cards.csv")
     df["full_path"] = DATA_DIR + "/" + df["filepaths"]
+    # drop rows whose image file is missing (guards against partial downloads)
     df = df[df["full_path"].map(_os.path.isfile)].reset_index(drop=True)
     class_names = sorted(df["card type"].unique())
     label_to_idx = {name: i for i, name in enumerate(class_names)}
@@ -127,7 +130,7 @@ def _(SEED, df, np):
             all_paths,
             all_labels,
             train_size=train_frac,
-            stratify=all_labels,
+            stratify=all_labels,  # preserves class distribution in both halves
             random_state=SEED,
         )
         return train_paths, train_labels, test_paths, test_labels
@@ -163,6 +166,7 @@ def _(BATCH_SIZE, IMAGE_SIZE, NUM_CLASSES, tf):
         ds = ds.map(_decode, num_parallel_calls=AUTOTUNE)
         ds = ds.batch(BATCH_SIZE)
         if training:
+            # augment in [0,255] range before preprocess_fn rescales/shifts
             ds = ds.map(lambda x, y: (augment(x, training=True), y), num_parallel_calls=AUTOTUNE)
         ds = ds.map(lambda x, y: (preprocess_fn(x), y), num_parallel_calls=AUTOTUNE)
         return ds.prefetch(AUTOTUNE)
@@ -193,6 +197,7 @@ def _(IMAGE_SIZE, NUM_CLASSES, tf):
         backbone.trainable = False
 
         inputs = tf.keras.Input(shape=IMAGE_SIZE + (3,))
+        # training=False keeps BatchNorm in inference mode (uses ImageNet running stats)
         x = backbone(inputs, training=False)
         x = tf.keras.layers.Dropout(0.5)(x)
         outputs = tf.keras.layers.Dense(NUM_CLASSES, activation="softmax")(x)
@@ -222,6 +227,7 @@ def _(
 ):
     import time
 
+    # thin wrapper so merged history looks like a Keras History object
     class _Hist:
         def __init__(self, h):
             self.history = h
@@ -239,13 +245,16 @@ def _(
         t0 = time.time()
         h1 = model.fit(train_ds, validation_data=test_ds, epochs=EPOCHS_PHASE1, callbacks=cb1, verbose=2)
 
+        # layers[0]=Input, layers[1]=backbone (always true for our two-layer model)
         backbone = model.layers[1]
         backbone.trainable = True
         n_layers = len(backbone.layers)
         n_unfreeze = max(1, int(n_layers * UNFREEZE_FRACTION))
+        # keep lower layers frozen — their edge/texture detectors are universally useful
         for layer in backbone.layers[:-n_unfreeze]:
             layer.trainable = False
         for layer in backbone.layers:
+            # BN running stats were calibrated on ImageNet; mini-batches of 32 cards would corrupt them
             if isinstance(layer, tf.keras.layers.BatchNormalization):
                 layer.trainable = False
 
@@ -320,6 +329,7 @@ def _(MODEL_NAMES, RESULTS_DIR, SMOKE_TEST, SPLITS, evaluate, make_split, np, pd
     for _d in (history_dir, cm_dir, prob_dir):
         _os.makedirs(_d, exist_ok=True)
 
+    # resume support: skip experiments already written to CSV
     if _os.path.exists(csv_path):
         _rows = pd.read_csv(csv_path).to_dict("records")
         _done = {(_r["model"], float(_r["split"])) for _r in _rows}
@@ -359,6 +369,7 @@ def _(MODEL_NAMES, RESULTS_DIR, SMOKE_TEST, SPLITS, evaluate, make_split, np, pd
         print(f"  acc={_res['accuracy']:.4f}  f1={_res['macro_f1']:.4f}  auc={_res['auc_macro']:.4f}  time={_dt:.1f}s")
 
         del _model, _history, _test_ds, _res
+        # release VRAM and TF graph state so the next model doesn't OOM
         tf.keras.backend.clear_session()
         _gc.collect()
 
