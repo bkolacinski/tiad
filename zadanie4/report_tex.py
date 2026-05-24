@@ -35,12 +35,12 @@ def _table_wyniki(df: pd.DataFrame) -> str:
         "\\begin{table}[H]", "\\centering",
         "\\caption{Uśrednione wartości błędu $f(x)-f^*$ po "
         f"{config.NUM_RUNS} przebiegach (D={config.D}). Niżej = lepiej; "
-        "wartości lepsze pogrubiono.}",
+        "wynik lepszy pogrubiono.}",
         "\\label{tab:wyniki}",
-        "\\begin{tabular}{|c|l|c|c|}", "\\hline",
+        "\\begin{tabular}{llrr}", "\\toprule",
         "\\textbf{Funkcja} & \\textbf{Kategoria} & "
         "\\textbf{SABOA (śr. $\\pm$ odch.)} & \\textbf{DESABOA (śr. $\\pm$ odch.)} \\\\",
-        "\\hline",
+        "\\midrule",
     ]
     for fid in config.FUNCTIONS:
         s, d = piv[("SABOA", fid)], piv[("DESABOA", fid)]
@@ -48,8 +48,7 @@ def _table_wyniki(df: pd.DataFrame) -> str:
         s_cell = f"${_sci(s.mean)} \\pm {_sci(s.std)}$"
         d_cell = f"$\\mathbf{{{_sci(d.mean)} \\pm {_sci(d.std)}}}$"
         lines.append(f"F{fid} & {cat} & {s_cell} & {d_cell} \\\\")
-        lines.append("\\hline")
-    lines += ["\\end{tabular}", "\\end{table}"]
+    lines += ["\\bottomrule", "\\end{tabular}", "\\end{table}"]
     return "\n".join(lines) + "\n"
 
 
@@ -60,17 +59,16 @@ def _table_wilcoxon(wdf: pd.DataFrame) -> str:
         "\\caption{Test sumy rang Wilcoxona (sparowany, dwustronny, $\\alpha=0{,}05$) "
         f"dla {cand} względem {base}. Zwycięzca wg mediany przy $p<0{{,}}05$.}}",
         "\\label{tab:wilcoxon}",
-        "\\begin{tabular}{|c|c|c|c|c|}", "\\hline",
+        "\\begin{tabular}{lrrrl}", "\\toprule",
         "\\textbf{Funkcja} & \\textbf{med. SABOA} & \\textbf{med. DESABOA} & "
-        "\\textbf{$p$} & \\textbf{Zwycięzca} \\\\", "\\hline",
+        "\\textbf{$p$} & \\textbf{Zwycięzca} \\\\", "\\midrule",
     ]
     for r in wdf.itertuples():
         med_b = getattr(r, f"median_{base}")
         med_c = getattr(r, f"median_{cand}")
         lines.append(
             f"{r.func} & ${_sci(med_b)}$ & ${_sci(med_c)}$ & ${_sci(r.p_value)}$ & {r.winner} \\\\")
-        lines.append("\\hline")
-    lines += ["\\end{tabular}", "\\end{table}"]
+    lines += ["\\bottomrule", "\\end{tabular}", "\\end{table}"]
     return "\n".join(lines) + "\n"
 
 

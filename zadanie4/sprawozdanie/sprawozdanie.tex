@@ -3,161 +3,148 @@
 \usepackage[utf8]{inputenc}
 \usepackage[polish]{babel}
 \usepackage{graphicx}
-\usepackage{amsmath}
-\usepackage{amssymb}
 \usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage[section]{placeins}
 \usepackage{float}
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=3.5cm, right=3.5cm]{geometry}
+\usepackage[protrusion=true,expansion=false]{microtype}
 
-\setlength{\textheight}{21cm}
-
-\title{{\bf Zadanie nr 4 -- Modyfikacja algorytmu SABOA\\ zwiększająca różnorodność roju (DESABOA)}\linebreak
-Techniki Inteligencji Obliczeniowej w Analizie Danych}
-\author{Nikodem Nowak, 251598}
-\date{\today}
+\title{{\bf Zadanie nr 4 -- Modyfikacja algorytmu SABOA\\zwiększająca różnorodność roju (DESABOA)}\linebreak
+Techniki Inteligentnej Analizy Danych}
+\author{Nikodem Nowak, 251598 \and Bartosz Kołaciński, 251554}
+\date{2026-05-24}
 
 \begin{document}
 \clearpage\maketitle
 \thispagestyle{empty}
 \newpage
+\tableofcontents
+\thispagestyle{empty}
+\newpage
 \setcounter{page}{1}
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% CEL ZADANIA
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Cel zadania}
 
 Celem zadania było zaproponowanie modyfikacji jednego z rojowych algorytmów
 optymalizacji -- GGL-PSOD lub SABOA -- zwiększającej różnorodność roju i poprawiającej
 skuteczność metody, a następnie eksperymentalne potwierdzenie jej wyższości nad
-algorytmem bazowym. Do modyfikacji wybrano algorytm \textbf{SABOA} (Self-Adaption
-Butterfly Optimization Algorithm)~\cite{saboa}, zbudowany na klasycznym algorytmie
-\textbf{BOA} (Butterfly Optimization Algorithm)~\cite{boa}. Zaproponowany wariant,
-nazwany \textbf{DESABOA} (Diversity-Enhanced SABOA), wprowadza dwa mechanizmy
-przeciwdziałające przedwczesnej zbieżności roju.
-
-W ramach zadania zrealizowano:
+algorytmem bazowym. Do modyfikacji wybrano algorytm \textbf{SABOA}~\cite{saboa},
+zbudowany na algorytmie \textbf{BOA}~\cite{boa}. Zaproponowany wariant, nazwany
+\textbf{DESABOA} (\emph{Diversity-Enhanced SABOA}), wprowadza dwa mechanizmy
+przeciwdziałające przedwczesnej zbieżności roju. Zakres prac obejmował:
 \begin{itemize}
-    \item implementację algorytmu bazowego SABOA oraz proponowanego DESABOA,
-    \item dobór parametrów (zakres poszukiwań, wymiar $D$, budżet ewaluacji),
-    \item badania na 12 funkcjach z zestawu \textbf{CEC2017} obejmujących wszystkie
-          cztery kategorie (unimodalne, multimodalne, hybrydowe, złożone),
-    \item uśrednienie wyników po \textbf{51 niezależnych przebiegach} każdej funkcji,
-    \item porównanie z SABOA oraz weryfikację istotności statystycznej testem sumy
-          rang \textbf{Wilcoxona}.
+  \item implementację algorytmu bazowego SABOA oraz proponowanego DESABOA;
+  \item dobór parametrów: zakres poszukiwań, wymiar $D$, budżet ewaluacji funkcji celu;
+  \item badania na 12 funkcjach z zestawu \textbf{CEC2017}~\cite{cec2017} obejmujących
+        wszystkie cztery kategorie (unimodalne, multimodalne, hybrydowe, złożone);
+  \item uśrednienie wyników po \textbf{51 niezależnych przebiegach} każdej funkcji;
+  \item porównanie z SABOA oraz weryfikację istotności statystycznej testem sumy rang
+        \textbf{Wilcoxona}.
 \end{itemize}
 
-\section{Algorytmy bazowe}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% WSTEP TEORETYCZNY
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Wstęp teoretyczny}
 
-\subsection{BOA}
-W algorytmie BOA~\cite{boa} każdy motyl wytwarza zapach o natężeniu zależnym od jakości
-rozwiązania, $f = c\cdot I^{a}$, gdzie $I$ to natężenie bodźca (wartość funkcji celu),
-$c$ -- modalność sensoryczna, $a$ -- wykładnik. Z prawdopodobieństwem przełączania $p$
-motyl wykonuje ruch globalny ku najlepszemu osobnikowi $g^{*}$ lub ruch lokalny względem
-dwóch losowych osobników:
+\subsection{Algorytm BOA}
+W algorytmie BOA~\cite{boa} każdy motyl wytwarza zapach o natężeniu
+$f = c\,I^{a}$, gdzie $I$ to natężenie bodźca (jakość rozwiązania), $c$~--~modalność
+sensoryczna, $a$~--~wykładnik. Z prawdopodobieństwem przełączania $p$ motyl wykonuje
+ruch globalny ku najlepszemu osobnikowi $g^{*}$ albo ruch lokalny względem dwóch
+losowych osobników $x_j, x_k$:
 \begin{align}
 \text{globalny:}\quad & x_i \leftarrow x_i + (r_1 r_2\, g^{*} - x_i)\, f_i,\\
 \text{lokalny:}\quad  & x_i \leftarrow x_i + (r_1 r_2\, x_j - x_k)\, f_i,
 \end{align}
-gdzie $r_1, r_2 \sim U(0,1)$, a $x_j, x_k$ to losowo wybrani osobnicy.
+gdzie $r_1, r_2 \sim U(0,1)$.
 
-\subsection{SABOA}
-SABOA~\cite{saboa} upraszcza BOA, usuwając parametry $c$, $a$ oraz natężenie bodźca $I$.
-Jedynym parametrem pozostaje prawdopodobieństwo przełączania $p$. Współczynnik zapachu
-jest \emph{samoadaptacyjny} i maleje liniowo w czasie:
-\begin{equation}
-f = u\left(1 - \frac{t}{T}\right), \qquad u \sim U(0,1),
-\end{equation}
-gdzie $t$ -- numer iteracji, $T$ -- maksymalna liczba iteracji. Aktualizacja położenia:
+\subsection{Algorytm SABOA}
+SABOA~\cite{saboa} upraszcza BOA, usuwając parametry $c$, $a$ oraz natężenie $I$;
+jedynym parametrem pozostaje $p$. Współczynnik zapachu jest samoadaptacyjny i maleje
+liniowo w czasie, $f = u\,(1 - t/T)$, $u \sim U(0,1)$, gdzie $t$~--~numer iteracji,
+$T$~--~liczba iteracji. Aktualizacja położenia (zgodnie z publiczną implementacją
+referencyjną, gdyż artykuł źródłowy jest płatny):
 \begin{align}
 \text{globalny:}\quad & x_i \leftarrow x_i + g^{*} + (x_i - g^{*})\, f,\\
 \text{lokalny:}\quad  & x_i \leftarrow 0{,}5\,(g^{*} + w^{*})\, f,
 \end{align}
-gdzie $w^{*}$ to najgorszy osobnik w populacji. W obu fazach stosowana jest akceptacja
-zachłanna (zachowanie nowego położenia tylko gdy poprawia wartość funkcji celu).
-Równania przyjęto zgodnie z publiczną implementacją referencyjną, ponieważ artykuł
-źródłowy jest płatny.
+gdzie $w^{*}$ to najgorszy osobnik. Mały współczynnik $f\in(0,1)$ daje krótkie kroki,
+przez co rój szybko traci różnorodność i przedwcześnie zbiega -- ta słabość jest celem
+modyfikacji.
 
-Mały współczynnik $f\in(0,1)$ oznacza krótkie kroki, przez co rój szybko traci
-różnorodność i utyka w minimach lokalnych. To właśnie ta słabość jest celem
-zaproponowanej modyfikacji.
-
-\section{Zaproponowana modyfikacja: DESABOA}
-
+\subsection{Proponowana modyfikacja DESABOA}
 DESABOA rozszerza SABOA o dwa mechanizmy zwiększające różnorodność roju.
 
-\subsection{(a) Uczenie przez przeciwności (OBL) w inicjalizacji}
+\paragraph{(a) Uczenie przez przeciwności (OBL).}
 Obok losowej populacji $P=\{x_i\}$ generowana jest populacja przeciwna
-\begin{equation}
-\breve{x}_{i,j} = lb_j + ub_j - x_{i,j},
-\end{equation}
-po czym oceniane jest $2N$ punktów i zachowywane $N$ najlepszych. Dzięki temu start
-algorytmu jest równomierniej rozłożony w przestrzeni poszukiwań i statystycznie bliższy
-optimum~\cite{glpso}.
+$\breve{x}_{i,j} = lb_j + ub_j - x_{i,j}$; oceniane jest $2N$ punktów, a zachowywane $N$
+najlepszych. Daje to równomierniejszy start, statystycznie bliższy optimum~\cite{glpso}.
 
-\subsection{(b) Mutacja sterowana różnorodnością roju}
-W każdej iteracji mierzona jest różnorodność roju jako średnia odległość osobników od
-centroidu:
+\paragraph{(b) Mutacja sterowana różnorodnością roju.}
+W każdej iteracji mierzona jest różnorodność jako średnia odległość osobników od
+centroidu $\bar{x}$:
 \begin{equation}
-D_t = \frac{1}{N}\sum_{i=1}^{N}\left\lVert x_i - \bar{x}\right\rVert,
-\qquad \bar{x} = \frac{1}{N}\sum_{i=1}^{N} x_i.
+D_t = \frac{1}{N}\sum_{i=1}^{N}\left\lVert x_i - \bar{x}\right\rVert.
 \end{equation}
-Gdy różnorodność spada poniżej progu, $D_t < \theta\, D_0$ (gdzie $D_0$ to różnorodność
-początkowa), lub najlepsze rozwiązanie stagnuje przez ustaloną liczbę iteracji,
-$m$ najgorszych osobników jest perturbowanych jednym z dwóch operatorów:
+Gdy $D_t < \theta\,D_0$ (gdzie $D_0$~--~różnorodność początkowa) lub najlepsze
+rozwiązanie stagnuje, $m$ najgorszych osobników jest perturbowanych jednym z operatorów
+o ciężkich ogonach:
 \begin{align}
 \text{lot Lévy'ego:}\quad & x_i \leftarrow g^{*} + \alpha\,(ub-lb)\,\mathrm{L\acute{e}vy}(\beta)\odot(x_i - g^{*}),\\
 \text{skok Cauchy'ego:}\quad & x_i \leftarrow g^{*} + \gamma\,(ub-lb)\,\mathrm{Cauchy}(0,1),
 \end{align}
-gdzie krok Lévy'ego wyznaczany jest metodą Mantegny ze wskaźnikiem stabilności $\beta$.
-Ciężkie ogony rozkładów Lévy'ego i Cauchy'ego umożliwiają zarówno drobne korekty, jak i
-rzadkie duże skoki pozwalające uciec z minimów lokalnych. Re-injekcja przywraca
-różnorodność roju, nie niszcząc najlepszych osobników (perturbowani są tylko najgorsi).
-
-\subsection{Schemat działania DESABOA}
-\begin{enumerate}
-    \item Inicjalizacja populacji z OBL; wyznaczenie $g^{*}$, $w^{*}$, $D_0$.
-    \item Dopóki budżet ewaluacji nie został wyczerpany:
-    \begin{enumerate}
-        \item dla każdego osobnika: faza globalna lub lokalna SABOA (zależnie od $p$),
-        \item akceptacja zachłanna, aktualizacja $g^{*}$ i $w^{*}$,
-        \item pomiar $D_t$; jeśli $D_t < \theta D_0$ lub stagnacja -- mutacja $m$
-              najgorszych osobników lotem Lévy'ego / skokiem Cauchy'ego.
-    \end{enumerate}
-\end{enumerate}
+gdzie krok Lévy'ego wyznaczany jest metodą Mantegny. Re-injekcja przywraca różnorodność
+roju, perturbując wyłącznie najgorszych osobników (najlepsze pozostają nienaruszone).
 Wszystkie dodatkowe ewaluacje (OBL, re-injekcja) wliczane są do wspólnego budżetu, więc
 porównanie z SABOA pozostaje uczciwe.
 
-\section{Konfiguracja badań}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% EKSPERYMENTY I WYNIKI
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Eksperymenty i wyniki}
 
+\subsection{Konfiguracja badań}
 \begin{table}[H]
 \centering
 \caption{Parametry eksperymentu.}
-\begin{tabular}{|l|c|}
-\hline
+\label{tab:konfiguracja}
+\begin{tabular}{lr}
+\toprule
 \textbf{Parametr} & \textbf{Wartość} \\
-\hline
-Zestaw funkcji & CEC2017 (12 funkcji) \\ \hline
-Wymiar $D$ & 10 \\ \hline
-Zakres poszukiwań & $[-100, 100]^{D}$ \\ \hline
-Liczność populacji $N$ & 30 \\ \hline
-Budżet ewaluacji (MAX\_FES) & $10000\cdot D = 100\,000$ \\ \hline
-Liczba przebiegów & 51 \\ \hline
-Prawd. przełączania $p$ & 0{,}8 \\ \hline
-Próg różnorodności $\theta$ & 0{,}10 \\ \hline
-Frakcja perturbowanych $m$ & 0{,}20\,$N$ \\ \hline
-Lot Lévy'ego $\beta$, $\alpha$ & 1{,}5\,;\ 0{,}01 \\ \hline
-Skok Cauchy'ego $\gamma$ & 0{,}10 \\ \hline
+\midrule
+Zestaw funkcji & CEC2017 (12 funkcji) \\
+Wymiar $D$ & 10 \\
+Zakres poszukiwań & $[-100, 100]^{D}$ \\
+Liczność populacji $N$ & 30 \\
+Budżet ewaluacji (MAX\_FES) & $10000\cdot D = 100\,000$ \\
+Liczba przebiegów & 51 \\
+Prawd. przełączania $p$ & 0{,}8 \\
+Próg różnorodności $\theta$ & 0{,}10 \\
+Frakcja perturbowanych & 0{,}20\,$N$ \\
+Lot Lévy'ego $\beta$;\ $\alpha$ & 1{,}5;\ 0{,}01 \\
+Skok Cauchy'ego $\gamma$ & 0{,}10 \\
+\bottomrule
 \end{tabular}
 \end{table}
 
 Funkcje dobrano tak, aby pokryć wszystkie kategorie CEC2017: \textbf{unimodalną} (F1),
 \textbf{multimodalne} (F4, F5, F9), \textbf{hybrydowe} (F10, F14, F17) oraz
-\textbf{złożone} (F20, F21, F24, F27, F29). Jako miarę jakości przyjęto błąd
-$f(x)-f^{*}$, gdzie $f^{*}$ to znane optimum globalne (im niżej, tym lepiej; ideał $=0$).
-Liczba iteracji wynika z budżetu ewaluacji, dzięki czemu oba algorytmy zużywają tyle samo
-ewaluacji funkcji celu.
+\textbf{złożone} (F20, F21, F24, F27, F29). Miarą jakości jest błąd $f(x)-f^{*}$, gdzie
+$f^{*}$~--~znane optimum globalne (im niżej, tym lepiej; ideał $=0$). Liczba iteracji
+wynika z budżetu ewaluacji, dzięki czemu oba algorytmy zużywają tyle samo wywołań funkcji
+celu, a porównanie dotyczy wyłącznie jakości eksploracji.
 
-\section{Wyniki}
-
+\subsection{Wyniki liczbowe}
 Tabela~\ref{tab:wyniki} zestawia uśrednione wartości błędu. DESABOA uzyskuje niższy błąd
-średni na \textbf{każdej} z 12 funkcji, najczęściej o 1--4 rzędy wielkości.
+średni na \emph{każdej} z 12 funkcji, najczęściej o 1--4 rzędy wielkości.
 
 \input{tab_wyniki}
 
@@ -171,7 +158,7 @@ konsekwentnie obniża błąd dzięki wstrzykiwaniu różnorodności.
 \centering
 \includegraphics[width=0.49\textwidth]{figury/convergence_F#1.png}\hfill
 \includegraphics[width=0.49\textwidth]{figury/convergence_F#2.png}
-\caption{Krzywe zbieżności (CEC2017, D=10).}
+\caption{Krzywe zbieżności -- CEC2017 F#1 oraz F#2 (D=10).}
 \label{fig:conv#3}
 \end{figure}}
 
@@ -197,47 +184,34 @@ F21 i F29 (złożone).}
 \label{fig:box}
 \end{figure}
 
-\section{Test skuteczności (Wilcoxon)}
-
+\subsection{Test skuteczności (Wilcoxon)}
 Wyższość DESABOA zweryfikowano sparowanym testem sumy rang Wilcoxona (dwustronnym,
-$\alpha=0{,}05$) na 51 sparowanych przebiegach każdej funkcji. Wyniki zebrano w
-tabeli~\ref{tab:wilcoxon}.
+$\alpha=0{,}05$) na 51 sparowanych przebiegach każdej funkcji (tabela~\ref{tab:wilcoxon}).
+Na wszystkich 12 funkcjach różnica jest istotna statystycznie
+($p\approx 5\cdot10^{-10} \ll 0{,}05$), a zwycięzcą zawsze jest DESABOA, co daje bilans
+\textbf{12 zwycięstw / 0 remisów / 0 porażek}.
 
 \input{tab_wilcoxon}
 
-Na wszystkich 12 funkcjach różnica jest istotna statystycznie ($p\approx 5\cdot10^{-10}
-\ll 0{,}05$), a zwycięzcą zawsze jest DESABOA. Daje to bilans \textbf{12 zwycięstw /
-0 remisów / 0 porażek}.
-
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% WNIOSKI
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Wnioski}
-
 \begin{itemize}
-    \item Zaproponowana modyfikacja DESABOA -- uczenie przez przeciwności oraz mutacja
-          sterowana różnorodnością roju -- istotnie poprawia skuteczność SABOA na całym
-          badanym zestawie CEC2017.
-    \item DESABOA wygrywa \textbf{12/12} funkcji zarówno pod względem błędu średniego,
-          jak i istotności statystycznej (test Wilcoxona, $p\approx 5\cdot10^{-10}$).
-    \item Największe zyski (do 4 rzędów wielkości) występują na funkcjach hybrydowych i
-          złożonych, gdzie bazowy SABOA najszybciej traci różnorodność i przedwcześnie
-          zbiega -- co potwierdza, że to właśnie niedobór różnorodności był głównym
-          ograniczeniem metody bazowej.
-    \item Ponieważ budżet ewaluacji jest identyczny dla obu algorytmów, poprawa wynika
-          z lepszej eksploracji przestrzeni, a nie z większej liczby ewaluacji.
+  \item Zaproponowana modyfikacja DESABOA -- uczenie przez przeciwności oraz mutacja
+        sterowana różnorodnością roju -- istotnie poprawia skuteczność SABOA na całym
+        badanym zestawie CEC2017.
+  \item DESABOA wygrywa \textbf{12/12} funkcji zarówno pod względem błędu średniego, jak i
+        istotności statystycznej (test Wilcoxona, $p\approx 5\cdot10^{-10}$).
+  \item Największe zyski (do 4 rzędów wielkości) występują na funkcjach hybrydowych i
+        złożonych, gdzie bazowy SABOA najszybciej traci różnorodność i przedwcześnie
+        zbiega -- co potwierdza, że niedobór różnorodności był głównym ograniczeniem
+        metody bazowej.
+  \item Ponieważ budżet ewaluacji jest identyczny dla obu algorytmów, poprawa wynika
+        z lepszej eksploracji przestrzeni, a nie z większej liczby ewaluacji.
 \end{itemize}
 
-\begin{thebibliography}{9}
-\bibitem{saboa} Y. Fan, J. Shao, G. Sun, X. Shao,
-\emph{A Self-Adaption Butterfly Optimization Algorithm for Numerical Optimization
-Problems}, IEEE Access, vol. 8, 2020, s. 88026--88041.
-\bibitem{boa} S. Arora, S. Singh,
-\emph{Butterfly optimization algorithm: a novel approach for global optimization},
-Soft Computing, vol. 23, 2019, s. 715--734.
-\bibitem{ggl} A. Lin, W. Sun, H. Yu, G. Wu, H. Tang,
-\emph{Global genetic learning particle swarm optimization with diversity enhancement
-by ring topology}, Swarm and Evolutionary Computation, 2019.
-\bibitem{glpso} Y.-J. Gong, J.-J. Li, Y. Zhou, Y. Li, H. S.-H. Chung, Y.-H. Shi, J. Zhang,
-\emph{Genetic Learning Particle Swarm Optimization}, IEEE Transactions on Cybernetics,
-vol. 46, no. 10, 2016, s. 2277--2290.
-\end{thebibliography}
+\bibliographystyle{plain}
+\bibliography{bibliografia}
 
 \end{document}
